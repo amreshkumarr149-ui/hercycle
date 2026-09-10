@@ -1,0 +1,6 @@
+# Copy to android/key.properties and fill in (NEVER commit key.properties).
+# The Gradle build falls back to debug keys when this file is absent.
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=hercycle
+storeFile=upload-keystore.jks

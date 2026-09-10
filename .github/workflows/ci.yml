@@ -1,0 +1,93 @@
+name: CI
+
+# Runs on every push and pull request. Release APKs stay local-only:
+# they need android/key.properties + upload-keystore.jks, which must
+# never be committed (see .gitignore).
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  flutter-verify:
+    name: Flutter analyze + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  flutter-apk-debug:
+    name: Flutter debug APK
+    runs-on: ubuntu-latest
+    needs: flutter-verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 7
+
+  server:
+    name: x402 server typecheck + live probes
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # Dummy merchant address: enough to boot and prove the 402 gate.
+      # Real TestNet flows use server/.env locally (never committed).
+      AVM_ADDRESS: EDZX3ZJO3BT7XFDJCGMFEL33O4O3H62M3CSQPYVZ4AAFQ5UZVQQC27DJDI
+      FACILITATOR_URL: https://facilitator.goplausible.xyz
+      PORT: 4021
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit -p tsconfig.json
+      - name: Boot server and probe routes
+        run: |
+          npx tsx src/index.ts > server.log 2>&1 &
+          SRV=$!
+          trap 'kill $SRV' EXIT
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4021/health; then break; fi
+            sleep 3
+          done
+          # /health must answer 200 ...
+          curl -sf http://localhost:4021/health | grep -q '"ok":true'
+          # ... and an unpaid premium call must answer 402.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://localhost:4021/api/premium-report \
+            -H 'content-type: application/json' -d '{"logs":[]}')
+          test "$code" = "402"
+          # Unknown tx ids must verify cleanly as false, not crash.
+          curl -sf http://localhost:4021/api/receipt/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+            | grep -q '"verified":false'
