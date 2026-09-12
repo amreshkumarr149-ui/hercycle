@@ -1,5 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:hercycle/core/week_planner.dart';
+import 'package:hercycle/models/daily_log.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -17,6 +19,7 @@ class NotificationService {
   static const int mucusTriggerId = 2001;
   static const int lhTriggerId = 2002;
   static const int periodId = 3001;
+  static const int plannerId = 4001;
 
   static const AndroidNotificationDetails _dailyAndroid =
       AndroidNotificationDetails(
@@ -216,6 +219,118 @@ class NotificationService {
   static Future<void> cancelPeriodReminder() async {
     try {
       await _plugin.cancel(id: periodId);
+    } catch (_) {}
+  }
+
+  /// Evening lookahead for the Week Planner: one gentle nudge at 20:00
+  /// when tomorrow is tagged rest / PMS-likely / period. High and calm
+  /// tomorrows never ping. Same ID every time, so refreshed predictions
+  /// replace the alarm and dull tomorrows cancel it — no spam, ever.
+  /// Follows the master reminder switch (no separate toggle). Never throws.
+  static Future<void> syncPlannerNudge({
+    required String userId,
+    required Map<String, dynamic>? prediction,
+    required List<DailyLog>? logs,
+    required Map<String, dynamic>? profile,
+    required bool fromCache,
+  }) async {
+    try {
+      final prefs = await _reminderPrefs(userId);
+      if (!prefs.enabled || prediction == null) {
+        await cancelPlannerNudge();
+        return;
+      }
+      final rawDay = prediction['currentDay'];
+      final currentDay =
+          rawDay is int ? rawDay : int.tryParse('$rawDay') ?? 1;
+      final typicalCycle =
+          (profile?['typicalCycleLength'] as num?)?.toInt() ?? 28;
+      final typicalPeriod =
+          (profile?['typicalPeriodLength'] as num?)?.toInt() ?? 5;
+      final nextPeriod = prediction['nextPeriod'];
+      final ovulationDate = prediction['ovulationDate'];
+      final planned = planWeek(
+        today: DateTime.now(),
+        currentDay: currentDay,
+        typicalCycleLength: typicalCycle,
+        typicalPeriodLength: typicalPeriod,
+        nextPeriod: nextPeriod is DateTime ? nextPeriod : null,
+        ovulationDate: ovulationDate is DateTime ? ovulationDate : null,
+        ovulationLocked: prediction['isOvulationLocked'] == true,
+        lutealSignals:
+            lutealSignalsFrom(logs: logs, profile: profile, fromCache: fromCache),
+      );
+      if (planned.days.length < 2) {
+        await cancelPlannerNudge();
+        return;
+      }
+      final tomorrow = planned.days[1];
+      final nudge = plannerNudgeFor(tomorrow,
+          personalized: planned.personalized);
+      if (nudge == null) {
+        await cancelPlannerNudge();
+        return;
+      }
+      final at = DateTime(tomorrow.date.year, tomorrow.date.month,
+          tomorrow.date.day, 20, 0);
+      if (!at.isAfter(DateTime.now())) {
+        await cancelPlannerNudge();
+        return;
+      }
+      await _plugin.zonedSchedule(
+        id: plannerId,
+        title: nudge.title,
+        body: nudge.body,
+        scheduledDate: tz.TZDateTime.from(at, tz.local),
+        notificationDetails: const NotificationDetails(
+            android: _triggerAndroid, iOS: _darwin),
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+    } catch (_) {}
+  }
+
+  static Future<void> cancelPlannerNudge() async {
+    try {
+      await _plugin.cancel(id: plannerId);
+    } catch (_) {}
+  }
+
+  static const int testDayId = 5001;
+
+  /// One-shot pregnancy-test-day reminder for TTC mode. Scheduled at the
+  /// user's reminder hour on the suggested test day; refreshed/cancelled
+  /// alongside predictions. Copy never claims conception — testing does.
+  /// Never throws.
+  static Future<void> syncTestDayReminder(
+      String userId, DateTime? testDay) async {
+    try {
+      final prefs = await _reminderPrefs(userId);
+      if (!prefs.enabled || testDay == null) {
+        await cancelTestDayReminder();
+        return;
+      }
+      final at = DateTime(testDay.year, testDay.month, testDay.day,
+          prefs.hour, prefs.minute);
+      if (!at.isAfter(DateTime.now())) {
+        await cancelTestDayReminder();
+        return;
+      }
+      await _plugin.zonedSchedule(
+        id: testDayId,
+        title: 'Pregnancy test day 💗',
+        body:
+            'If you are trying, today is a good day to test — good luck, whatever the result.',
+        scheduledDate: tz.TZDateTime.from(at, tz.local),
+        notificationDetails: const NotificationDetails(
+            android: _triggerAndroid, iOS: _darwin),
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+      );
+    } catch (_) {}
+  }
+
+  static Future<void> cancelTestDayReminder() async {
+    try {
+      await _plugin.cancel(id: testDayId);
     } catch (_) {}
   }
 

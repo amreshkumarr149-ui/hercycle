@@ -1,7 +1,4 @@
-import {
-  ALGORAND_TESTNET_CAIP2,
-  USDC_TESTNET_ASA_ID,
-} from '@x402-avm/avm';
+import type { AlgorandNetworkConfig } from './algorand_network.js';
 
 export interface ReceiptCheck {
   verified: boolean;
@@ -13,19 +10,20 @@ export interface ReceiptCheck {
   reason?: string;
 }
 
-const ALGOD = 'https://testnet-api.algonode.cloud';
 const REQUIRED_MICRO_USDC = 10000; // $0.01 at 6 decimals
 
 /**
- * Verifies a TestNet payment directly against Algorand chain state.
- * Accepts only a CONFIRMED asset-transfer of >= $0.01 TestNet USDC
- * (ASA 10458941) to the merchant address. Everything else — unknown id,
+ * Verifies a payment directly against Algorand chain state on the
+ * configured network (see algorand_network.ts).
+ * Accepts only a CONFIRMED asset-transfer of >= $0.01 network USDC
+ * to the merchant address. Everything else — unknown id,
  * unconfirmed, wrong asset, short amount, wrong receiver — returns
  * verified:false with a specific reason. Pure read path: no keys needed.
  */
 export async function verifyReceipt(
   txId: string,
   merchant: string,
+  net: AlgorandNetworkConfig,
 ): Promise<ReceiptCheck> {
   const id = (txId ?? '').trim();
   if (!/^[A-Z2-7]{52}$/.test(id)) {
@@ -34,21 +32,21 @@ export async function verifyReceipt(
   let res: Response;
   try {
     res = await fetch(
-      `${ALGOD}/v2/transactions/${encodeURIComponent(id)}`,
+      `${net.algodBase}/v2/transactions/${encodeURIComponent(id)}`,
       { headers: { accept: 'application/json' } },
     );
   } catch {
     return {
       verified: false,
       txId: id,
-      reason: 'Could not reach the TestNet ledger. Check connection and retry.',
+      reason: `Could not reach the ${net.label} ledger. Check connection and retry.`,
     };
   }
   if (res.status === 404) {
     return {
       verified: false,
       txId: id,
-      reason: 'Transaction not found on Algorand TestNet.',
+      reason: `Transaction not found on Algorand ${net.label}.`,
     };
   }
   if (!res.ok) {
@@ -81,18 +79,18 @@ export async function verifyReceipt(
     return {
       verified: false,
       txId: id,
-      reason: `Not a token transfer (type: ${txn['tx-type'] ?? 'unknown'}). Pay $0.01 TestNet USDC to unlock.`,
+      reason: `Not a token transfer (type: ${txn['tx-type'] ?? 'unknown'}). Pay $0.01 ${net.assetLabel} to unlock.`,
     };
   }
   const xfer = txn['asset-transfer-transaction'] ?? {};
   const assetId = Number(xfer['asset-id']);
   const amount = Number(xfer.amount);
   const receiver = String(xfer.receiver ?? '');
-  if (assetId !== Number(USDC_TESTNET_ASA_ID)) {
+  if (assetId !== net.usdcAsaId) {
     return {
       verified: false,
       txId: id,
-      reason: `Wrong asset (ASA ${Number.isFinite(assetId) ? assetId : '?'}). Pay TestNet USDC (ASA ${USDC_TESTNET_ASA_ID}).`,
+      reason: `Wrong asset (ASA ${Number.isFinite(assetId) ? assetId : '?'}). Pay ${net.assetLabel} (ASA ${net.usdcAsaId}).`,
     };
   }
   if (receiver !== merchant) {
@@ -119,4 +117,3 @@ export async function verifyReceipt(
   };
 }
 
-export const RECEIPT_NETWORK = ALGORAND_TESTNET_CAIP2;

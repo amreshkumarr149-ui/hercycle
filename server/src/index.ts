@@ -4,17 +4,15 @@ import express from 'express';
 import { paymentMiddleware, x402ResourceServer } from '@x402-avm/express';
 import { HTTPFacilitatorClient } from '@x402-avm/core/server';
 import { ExactAvmScheme } from '@x402-avm/avm/exact/server';
-import {
-  ALGORAND_TESTNET_CAIP2,
-  USDC_TESTNET_ASA_ID,
-} from '@x402-avm/avm';
+import { getNetworkConfig } from './algorand_network.js';
 import { analyzePremium, type DailyLogInput } from './premium.js';
 import { verifyReceipt } from './receipt.js';
 import { answerLuna, checkLunaCap, type LunaSummary } from './luna.js';
 
 /**
  * HerCycle Deep Insight premium API — every data route is gated by x402 on
- * Algorand TestNet, settled through the GoPlausible facilitator.
+ * Algorand (TestNet by default, MainNet via ALGORAND_NETWORK=mainnet),
+ * settled through the GoPlausible facilitator.
  *
  * Unpaid request  -> 402 Payment Required (+ payment-required header)
  * Paid request    -> facilitator verifies + settles -> 200 + premium report
@@ -51,14 +49,18 @@ function throttle(
   next();
 }
 
+const NET = getNetworkConfig();
+
 if (!AVM_ADDRESS) {
-  console.error('Missing environment variable: AVM_ADDRESS (merchant TestNet address)');
+  console.error(
+    `Missing environment variable: AVM_ADDRESS (merchant ${NET.label} address)`,
+  );
   process.exit(1);
 }
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR_URL });
 const resourceServer = new x402ResourceServer(facilitatorClient);
-resourceServer.register(ALGORAND_TESTNET_CAIP2, new ExactAvmScheme());
+resourceServer.register(NET.caip2, new ExactAvmScheme());
 
 const app = express();
 app.use(cors());
@@ -69,19 +71,22 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'hercycle-deep-insight',
-    network: ALGORAND_TESTNET_CAIP2,
+    network: NET.caip2,
+    networkName: NET.name,
     facilitator: FACILITATOR_URL,
-    price: '$0.01 USDC',
+    price: NET.priceLabel,
+    explorerTxBase: NET.explorerTxBase,
   });
 });
 
 // ---- Free route: on-chain receipt verification ----
-// Lets the app confirm an externally-made TestNet payment (any wallet)
-// and unlock exactly one report for it. Read-only against the ledger;
-// the x402 middleware below only gates POST /api/premium-report.
+// Lets the app confirm an externally-made payment (any wallet) on the
+// configured network and unlock exactly one report for it. Read-only
+// against the ledger; the x402 middleware below only gates POST
+// /api/premium-report.
 app.get('/api/receipt/:txid', throttle, async (req, res) => {
   try {
-    const result = await verifyReceipt(req.params.txid ?? '', AVM_ADDRESS);
+    const result = await verifyReceipt(req.params.txid ?? '', AVM_ADDRESS, NET);
     res.json(result);
   } catch (err) {
     console.error('receipt check failed:', err);
@@ -95,9 +100,10 @@ app.get('/api/receipt/:txid', throttle, async (req, res) => {
 // a citation validator. Nothing is persisted.
 app.post('/api/luna/chat', throttle, async (req, res) => {
   try {
-    const { message, summary } = (req.body ?? {}) as {
+    const { message, summary, persona } = (req.body ?? {}) as {
       message?: unknown;
       summary?: LunaSummary;
+      persona?: unknown;
     };
     if (typeof message !== 'string' || message.trim().length === 0) {
       res.status(400).json({ error: 'Body must include message: string.' });
@@ -117,7 +123,7 @@ app.post('/api/luna/chat', throttle, async (req, res) => {
       });
       return;
     }
-    const result = await answerLuna(message, summary ?? {});
+    const result = await answerLuna(message, summary ?? {}, persona);
     res.json(result);
   } catch (err) {
     console.error('luna chat failed:', err);
@@ -138,9 +144,9 @@ app.use(
           {
             scheme: 'exact',
             price: '$0.01',
-            network: ALGORAND_TESTNET_CAIP2,
+            network: NET.caip2,
             payTo: AVM_ADDRESS,
-            extra: { asset: USDC_TESTNET_ASA_ID },
+            extra: { asset: String(NET.usdcAsaId) },
           },
         ],
         description:
@@ -172,7 +178,8 @@ app.post('/api/premium-report', throttle, (req, res) => {
     res.json({
       success: true,
       paid: true,
-      asset: 'USDC (TestNet)',
+      asset: NET.assetLabel,
+      network: NET.caip2,
       report,
       disclaimer:
         'Educational tracking summary only — not a medical diagnosis.',
@@ -185,9 +192,10 @@ app.post('/api/premium-report', throttle, (req, res) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`HerCycle x402 resource server on http://${HOST}:${PORT}`);
+  console.log(`  network:          Algorand ${NET.label} (${NET.caip2})`);
   console.log(`  merchant (payTo): ${AVM_ADDRESS}`);
   console.log(`  facilitator:      ${FACILITATOR_URL}`);
-  console.log(`  price:            $0.01 USDC on Algorand TestNet`);
+  console.log(`  price:            ${NET.priceLabel} on Algorand ${NET.label}`);
   if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
     console.warn(
       '  WARNING: bound to a non-loopback interface without TLS. ' +

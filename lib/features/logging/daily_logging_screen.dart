@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hercycle/core/database_repository.dart';
 import 'package:hercycle/core/notification_service.dart';
 import 'package:hercycle/core/sync_service.dart';
 import 'package:hercycle/core/telemetry_service.dart';
 import 'package:hercycle/models/daily_log.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:hercycle/providers/prediction_provider.dart';
 import 'package:hercycle/providers/clinical_data_provider.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 /// Which category of the daily log to show. Calendar category cards open
 /// a focused mini-form for just one section; [all] shows the full form.
@@ -56,6 +57,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
   double _crampScore = 0;
   bool _pelvicPressure = false;
   bool _backBowelPain = false;
+  bool _intimacy = false;
   bool _isLoading = false;
   final _notesController = TextEditingController();
 
@@ -81,7 +83,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
   }
 
   Future<void> _loadExistingLog() async {
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return;
     try {
       final existingLog = await DatabaseRepository().getLog(userId, widget.date);
@@ -99,6 +101,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
           _crampScore = (existingLog.symptomIntensity['Cramps'] ?? 0).toDouble().clamp(0, 10);
           _pelvicPressure = existingLog.pelvicPressure;
           _backBowelPain = existingLog.backBowelPain;
+          _intimacy = existingLog.intimacy;
           _notesController.text = existingLog.notes;
         });
       }
@@ -123,12 +126,12 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
             if (_shows(LogSection.period)) ...[
               Container(
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: context.her.card,
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 3))],
                 ),
                 child: Material(
-                  color: Colors.white,
+                  color: context.her.card,
                   borderRadius: BorderRadius.circular(16),
                   child: SwitchListTile(
                     title: const Text('Period', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -139,9 +142,9 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text('Flow Intensity', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text('Flow Intensity', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 4),
-              const Text('Needed for fibroid pattern screening', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              Text('Needed for fibroid pattern screening', style: TextStyle(fontSize: 12, color: context.her.muted)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -155,7 +158,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
             ],
 
             if (_shows(LogSection.symptoms)) ...[
-              const Text('Physical Symptoms', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text('Physical Symptoms', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -178,7 +181,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text('Cramp intensity (0-10)', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                    Text('Cramp intensity (0-10)', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: context.her.ink)),
                     Text('${_crampScore.round()}/10', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFFC26D81))),
                   ],
                 ),
@@ -195,7 +198,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Pain Score (0-10)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                  Text('Pain Score (0-10)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
                   Text('${_painScore.round()}/10', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFFC26D81))),
                 ],
               ),
@@ -224,7 +227,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
             ],
 
             if (_shows(LogSection.mood)) ...[
-              const Text('Mood', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text('Mood', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -238,7 +241,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
             ],
 
             if (_shows(LogSection.mucus)) ...[
-              const Text('Cervical Mucus', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text('Cervical Mucus', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -252,7 +255,7 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
             ],
 
             if (_shows(LogSection.lh)) ...[
-              const Text('LH Test', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text('LH Test', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -265,7 +268,19 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
               const SizedBox(height: 20),
             ],
 
-            const Text('Notes (optional)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+            SwitchListTile(
+              title: const Text('Intimacy',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text(
+                  'Log for fertility awareness (trying-to-conceive mode)'),
+              secondary: const Icon(Icons.favorite,
+                  color: Color(0xFFC26D81)),
+              value: _intimacy,
+              onChanged: (val) => setState(() => _intimacy = val),
+            ),
+            const SizedBox(height: 20),
+
+            Text('Notes (optional)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
             const SizedBox(height: 8),
             TextField(
               controller: _notesController,
@@ -285,34 +300,41 @@ class _DailyLoggingScreenState extends ConsumerState<DailyLoggingScreen> {
                   if (_symptoms.contains('Cramps')) {
                     intensity['Cramps'] = _crampScore.round();
                   }
-                  final log = DailyLog(
-                    date: widget.date,
-                    period: _period,
-                    symptoms: _symptoms,
-                    mood: _mood,
-                    mucus: _mucus,
-                    lhTest: _lhTest,
-                    flowIntensity: _flowIntensity,
-                    painScore: _painScore.round(),
-                    pelvicPressure: _pelvicPressure,
-                    backBowelPain: _backBowelPain,
-                    symptomIntensity: intensity,
-                    notes: _notesController.text,
-                  );
-                  final userId = FirebaseAuth.instance.currentUser?.uid;
+                  final userId = safeCurrentUid();
                   if (userId == null) {
                     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User not logged in")));
                     return;
                   }
                   setState(() => _isLoading = true);
                   final ctx = context;
+                  DailyLog? before;
                   try {
-                    DailyLog? before;
+                    before = await DatabaseRepository()
+                        .getLog(userId, widget.date);
+                  } catch (_) {}
+                  // Preserve parallel writers' fields (SOS reliefs) that
+                  // this form doesn't edit — merge semantics in saveLog
+                  // keeps them, but only if we carry them forward here.
+                  // Declared outside try so the offline catch can queue it.
+                  final log = DailyLog(
+                      date: widget.date,
+                      period: _period,
+                      symptoms: _symptoms,
+                      mood: _mood,
+                      mucus: _mucus,
+                      lhTest: _lhTest,
+                      flowIntensity: _flowIntensity,
+                      painScore: _painScore.round(),
+                      pelvicPressure: _pelvicPressure,
+                      backBowelPain: _backBowelPain,
+                      symptomIntensity: intensity,
+                      notes: _notesController.text,
+                      intimacy: _intimacy,
+                      reliefTried: before?.reliefTried ?? const {},
+                      reliefHelped: before?.reliefHelped ?? const {},
+                    );
                     try {
-                      before = await DatabaseRepository()
-                          .getLog(userId, widget.date);
-                    } catch (_) {}
-                    await DatabaseRepository().saveLog(userId, log);
+                      await DatabaseRepository().saveLog(userId, log);
                     await SyncService.markSynced(ref, userId, widget.date);
                     await TelemetryService.logEvent('daily_log_saved');
                     // State-machine triggers -> instant local notifications.

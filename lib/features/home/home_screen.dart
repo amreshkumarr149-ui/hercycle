@@ -2,12 +2,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:hercycle/core/database_repository.dart';
+import 'package:hercycle/core/ttc_insights.dart';
+import 'package:hercycle/core/week_planner.dart';
+import 'package:hercycle/features/home/ttc_hero_card.dart';
+import 'package:hercycle/features/home/week_planner_card.dart';
 import 'package:hercycle/models/daily_log.dart';
+import 'package:hercycle/providers/clinical_data_provider.dart';
 import 'package:hercycle/providers/prediction_provider.dart';
 import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:hercycle/services/user_service.dart';
 import 'package:hercycle/features/profile/complete_profile_screen.dart';
+import 'package:hercycle/features/profile/profile_screen.dart';
+import 'package:hercycle/features/logging/daily_logging_screen.dart';
+import 'package:hercycle/features/home/article_detail_screen.dart';
+import 'package:hercycle/features/home/cycle_odometer.dart';
+import 'package:hercycle/features/sos/sos_screen.dart';
 import 'package:hercycle/core/notification_service.dart';
 import 'package:hercycle/core/sync_service.dart';
 import 'package:hercycle/core/telemetry_service.dart';
@@ -17,7 +28,7 @@ import 'package:intl/intl.dart';
 /// Today's saved log, watched so the dashboard visibly reflects each save.
 final todayLogProvider = FutureProvider<DailyLog?>((ref) async {
   final user =
-      ref.watch(authUserProvider).value ?? FirebaseAuth.instance.currentUser;
+      ref.watch(authUserProvider).value ?? safeCurrentUser();
   if (user == null) return null;
   final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
   try {
@@ -34,7 +45,7 @@ final userProfileProvider = FutureProvider<Map<String, dynamic>?>((ref) async {
   // Watch auth state (not a one-shot currentUser read) so logging out and
   // signing in as a different account refetches instead of showing the
   // previous account's name from the provider cache.
-  final user = ref.watch(authUserProvider).value ?? FirebaseAuth.instance.currentUser;
+  final user = ref.watch(authUserProvider).value ?? safeCurrentUser();
   if (user == null) return null;
   return UserService().getUserDoc(user.uid);
 });
@@ -69,7 +80,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// Restore the offline outbox and retry anything still queued — a restart
   /// with connectivity back heals itself without user action.
   Future<void> _restoreSync() async {
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return;
     await SyncService.restore(ref, userId);
     if (!mounted) return;
@@ -89,7 +100,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _retrySync() async {
     if (_retrying) return;
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return;
     setState(() => _retrying = true);
     try {
@@ -115,7 +126,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// consent is on record, and the single profile read serves both purposes.
   /// Best-effort: never blocks the dashboard.
   Future<void> _bootstrapSession() async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) return;
     WidgetsBinding.instance
         .addPostFrameCallback((_) => _consentThenReminders(user.uid));
@@ -177,7 +188,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Future<void> _loadTodayMucus() async {
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return;
     try {
       final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -191,7 +202,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _saveMucus(String mucus) async {
     setState(() => _selectedMucus = mucus);
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId != null) {
       final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
       DailyLog? existing;
@@ -244,36 +255,327 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  /// Warm one-liner matched to the current cycle phase. Static strings —
+  /// encouragement only, never medical claims.
+  String _positiveNote(String phaseName, int day, bool locked) {
+    if (locked) {
+      return 'Ovulation confirmed ✓ — your body did something amazing.';
+    }
+    final p = phaseName.toLowerCase();
+    final variants = p.contains('menstrual')
+        ? [
+            'Rest is productive too — be gentle with yourself today. 🌸',
+            'Warm drinks, slow mornings — you deserve soft days. 🌸',
+          ]
+        : p.contains('ovulation')
+            ? [
+                'You may feel extra social and energized — enjoy it! ✨',
+                'Peak energy days — a great time for things you love. ✨',
+              ]
+            : p.contains('luteal')
+                ? [
+                    'Wind down kindly — cravings and feelings are valid. 🌙',
+                    'Slow evenings and early nights — recharge mode on. 🌙',
+                  ]
+                : [
+                    'Fresh-cycle energy is building — plant something new. 🌱',
+                    'Your body is resetting — small goals, steady steps. 🌱',
+                  ];
+    return variants[day % variants.length];
+  }
+
+  void _showNotificationSheet() {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => Consumer(
+        builder: (context, ref, _) {
+          final pending = ref.watch(pendingSyncProvider);
+          final pred = ref.watch(predictionProvider);
+          final nextPeriod =
+              pred.valueOrNull?['nextPeriod'] as DateTime?;
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Notifications',
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: context.her.ink)),
+                  const SizedBox(height: 12),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.event_repeat,
+                        color: Color(0xFFC26D81)),
+                    title: const Text('Period reminder'),
+                    subtitle: Text(nextPeriod != null
+                        ? 'Armed for ${DateFormat('MMM dd').format(nextPeriod)}'
+                        : 'Will arm once your next period is predicted'),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.bedtime_outlined,
+                        color: Color(0xFFC26D81)),
+                    title: const Text('Daily logging reminder'),
+                    subtitle:
+                        const Text('Evening nudge — time managed in Profile'),
+                    trailing: TextButton(
+                      onPressed: () {
+                        Navigator.pop(sheetContext);
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) => const ProfileScreen()));
+                      },
+                      child: const Text('Manage'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.opacity,
+                        color: Color(0xFFC26D81)),
+                    title: const Text('Mucus-shift alerts'),
+                    subtitle: const Text(
+                        'Automatic — a shift to wet mucus triggers an alert'),
+                  ),
+                  if (pending.isNotEmpty)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.cloud_upload_outlined,
+                          color: Colors.orange),
+                      title: Text(
+                          '${pending.length} change${pending.length == 1 ? '' : 's'} waiting to sync'),
+                      trailing: TextButton(
+                        onPressed: () {
+                          Navigator.pop(sheetContext);
+                          _retrySync();
+                        },
+                        child: const Text('Retry'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showOvulationWindow(
+      {required bool locked,
+      DateTime? ovulationDate,
+      DateTime? nextPeriod}) {
+    final fmt = DateFormat('MMM dd');
+    late final String title;
+    late final String body;
+    if (locked && ovulationDate != null) {
+      final start = ovulationDate.subtract(const Duration(days: 1));
+      final end = ovulationDate.add(const Duration(days: 1));
+      title = 'Ovulation Confirmed ✓';
+      body =
+          'Confirmed for ${fmt.format(ovulationDate)} via positive LH test.\n\nPeak fertile days were around ${fmt.format(start)} – ${fmt.format(end)}.';
+    } else if (ovulationDate != null) {
+      final start = ovulationDate.subtract(const Duration(days: 5));
+      final end = ovulationDate.add(const Duration(days: 1));
+      title = 'Estimated Fertile Window';
+      body =
+          'Estimated ovulation: ${fmt.format(ovulationDate)}.\n\nFertile window: ${fmt.format(start)} – ${fmt.format(end)}.';
+    } else if (nextPeriod != null) {
+      final ovu = nextPeriod.subtract(const Duration(days: 14));
+      final start = ovu.subtract(const Duration(days: 5));
+      final end = ovu.add(const Duration(days: 1));
+      title = 'Estimated Fertile Window';
+      body =
+          'Estimated ovulation: ${fmt.format(ovu)} (mid-cycle estimate).\n\nFertile window: ${fmt.format(start)} – ${fmt.format(end)}.';
+    } else {
+      title = 'Ovulation Window';
+      body =
+          'Not enough tracked data yet — log your periods (and LH tests if you use them) to unlock fertile-window estimates.';
+    }
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(body, style: const TextStyle(fontSize: 14, height: 1.5)),
+            const SizedBox(height: 12),
+            Text(
+              'Estimates vary from cycle to cycle and are for awareness only — not contraception.',
+              style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  color: dialogContext.her.muted),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Curated cycle education. Static general-health content — no personal
+  /// data, no diagnosis, no medical claims beyond everyday awareness.
+  List<Article> get _learnArticles => const [
+        Article(
+          title: 'Your 4 Cycle Phases',
+          description: 'Menstrual, follicular, ovulation, luteal — in a nutshell.',
+          content:
+              'Menstrual: bleeding days — rest and iron-rich foods help.\n\nFollicular: energy rebuilds as estrogen rises — good days to start things.\n\nOvulation: around mid-cycle, an egg is released; mucus often turns clear and slippery.\n\nLuteal: progesterone rises — you may feel calmer, then PMS-like symptoms before bleeding.',
+          category: 'Basics',
+        ),
+        Article(
+          title: 'Cervical Mucus, Decoded',
+          description: 'What dry, sticky, creamy and eggwhite mean.',
+          content:
+              'Dry / nothing: common right after bleeding.\n\nSticky / tacky: early fertile transition.\n\nCreamy / lotion-like: fertility rising.\n\nEggwhite / slippery and stretchy: peak fertility signal around ovulation.\n\nTracking it daily is one of the simplest awareness tools you have.',
+          category: 'Body signs',
+        ),
+        Article(
+          title: 'PMS vs PMDD',
+          description: 'When monthly symptoms deserve a doctor visit.',
+          content:
+              'PMS (cramps, mood swings, bloating) is common in the luteal phase and eases with bleeding.\n\nPMDD is rarer and much stronger — severe mood shifts, hopelessness or anger that disrupt daily life.\n\nIf symptoms regularly stop you from working, studying or sleeping, note the pattern in HerCycle and discuss it with a healthcare professional.',
+          category: 'Wellness',
+        ),
+        Article(
+          title: 'Spotting vs Period',
+          description: 'How to tell them apart — and red flags.',
+          content:
+              'Spotting is light — a few drops, often pink or brown, no real flow.\n\nA period has steady flow and lasts days.\n\nOccasional mid-cycle spotting around ovulation can be normal.\n\nSee a doctor if bleeding is very heavy, lasts over 7 days, happens after menopause, or comes with severe pain.',
+          category: 'Know more',
+        ),
+      ];
+
+  static const _articleEmoji = ['🌸', '💧', '🌙', '🩸'];
+
   @override
   Widget build(BuildContext context) {
-    // Keep the one-shot period alert in sync whenever predictions refresh.
+    // Keep the one-shot period alert + evening planner nudge in sync
+    // whenever predictions refresh.
     ref.listen(predictionProvider, (prev, next) {
-      final userId = FirebaseAuth.instance.currentUser?.uid;
+      final userId = safeCurrentUid();
       if (userId == null) return;
       next.whenData((data) {
         final np = data['nextPeriod'];
         NotificationService.syncPeriodReminder(
             userId, np is DateTime ? np : null);
+        final clin = ref.read(clinicalDataProvider).valueOrNull;
+        final prof = ref.read(userProfileProvider).valueOrNull?['data']
+            as Map<String, dynamic>?;
+        final logs = clin?['logs'];
+        NotificationService.syncPlannerNudge(
+          userId: userId,
+          prediction: data,
+          logs: logs is List<DailyLog> ? logs : null,
+          profile: prof,
+          fromCache: clin?['fromCache'] == true,
+        );
+        // Test-day pointer, only while TTC mode is on (needs only
+        // prediction anchors). Turning the mode off cancels any alarm.
+        try {
+          if (prof?['ttcMode'] == true) {
+            final ovu = data['ovulationDate'];
+            final status = ttcStatus(
+              today: DateTime.now(),
+              ovulationDate: ovu is DateTime ? ovu : null,
+              nextPeriod: np is DateTime ? np : null,
+            );
+            NotificationService.syncTestDayReminder(
+                userId, status.testDay);
+          } else {
+            NotificationService.cancelTestDayReminder();
+          }
+        } catch (_) {}
       });
     });
     final predictionAsync = ref.watch(predictionProvider);
     final userProfileAsync = ref.watch(userProfileProvider);
     final todayLogAsync = ref.watch(todayLogProvider);
+    final clinicalAsync = ref.watch(clinicalDataProvider);
+    final pendingCount = ref.watch(pendingSyncProvider).length;
 
     return Scaffold(
-      backgroundColor: const Color(0xFFFFF9F9),
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(20.0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Top Logo & Branding
-              const FadeSlideIn(
-                child: Column(
+              // Top header: branding left, notifications right.
+              FadeSlideIn(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Icon(Icons.face_retouching_natural, size: 50, color: Color(0xFFC26D81)),
-                    Text('HerCycle', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFFC26D81))),
+                    const Row(
+                      children: [
+                        Icon(Icons.face_retouching_natural,
+                            size: 34, color: Color(0xFFC26D81)),
+                        SizedBox(width: 8),
+                        Text('HerCycle',
+                            style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFFC26D81))),
+                      ],
+                    ),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          onPressed: () async {
+                            final saved = await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (_) => const SosScreen()),
+                            );
+                            if (saved == true) {
+                              ref.invalidate(todayLogProvider);
+                            }
+                          },
+                          icon: const Icon(Icons.sos_outlined,
+                              size: 26, color: Color(0xFFE53935)),
+                          tooltip: 'Cramp SOS',
+                        ),
+                        Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            IconButton(
+                              onPressed: _showNotificationSheet,
+                              icon: Icon(Icons.notifications_outlined,
+                                  size: 26, color: context.her.ink),
+                              tooltip: 'Notifications',
+                            ),
+                        if (pendingCount > 0)
+                          Positioned(
+                            right: 8,
+                            top: 8,
+                            child: Container(
+                              width: 10,
+                              height: 10,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Colors.orange,
+                              ),
+                            ),
+                          ),
+                        ],
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ),
@@ -330,11 +632,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       // saves): repair path instead of the "Sarah" fallback.
                       return Column(
                         children: [
-                          const Text('Welcome! ❤️',
+                          Text('Welcome! ❤️',
                               style: TextStyle(
                                   fontSize: 20,
                                   fontWeight: FontWeight.bold,
-                                  color: Color(0xFF4A4A4A))),
+                                  color: context.her.ink)),
                           const SizedBox(height: 8),
                           Container(
                             width: double.infinity,
@@ -382,27 +684,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     return Column(
                       children: [
                         Text('${_getGreeting()}, $name! ❤️',
-                            style: const TextStyle(
+                            style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
-                                color: Color(0xFF4A4A4A))),
+                                color: context.her.ink)),
                         if (fromCache)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 4),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
                             child: Text('Offline mode — showing saved data',
                                 style: TextStyle(
                                     fontSize: 11,
-                                    color: Colors.grey,
+                                    color: context.her.muted,
                                     fontStyle: FontStyle.italic)),
                           ),
                       ],
                     );
                   },
-                  loading: () => const Text('Hello! ❤️',
+                  loading: () => Text('Hello! ❤️',
                       style: TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFF4A4A4A))),
+                          color: context.her.ink)),
                   error: (e, st) => Text('Could not load profile: $e',
                       textAlign: TextAlign.center,
                       style: const TextStyle(
@@ -414,15 +716,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 builder: (context, ref, _) {
                   final pending = ref.watch(pendingSyncProvider);
                   if (pending.isEmpty) {
-                    return const Row(
+                    return Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.cloud_done_outlined,
+                        const Icon(Icons.cloud_done_outlined,
                             size: 14, color: Colors.green),
-                        SizedBox(width: 4),
+                        const SizedBox(width: 4),
                         Text('All synced',
                             style: TextStyle(
-                                fontSize: 11, color: Colors.grey)),
+                                fontSize: 11, color: context.her.muted)),
                       ],
                     );
                   }
@@ -481,6 +783,77 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     lastPeriodLine =
                         'Last period started ${DateFormat('MMM dd').format(periodStart)}';
                   }
+                  // Ovulation-window summary for the dedicated card.
+                  final ovuDate = data['ovulationDate'] as DateTime?;
+                  final fmtDay = DateFormat('MMM dd');
+                  final ovuRef = ovuDate ??
+                      nextPeriod?.subtract(const Duration(days: 14));
+                  final String ovuSummary;
+                  if (isOvulationLocked && ovuDate != null) {
+                    ovuSummary = 'Confirmed ✓ ${fmtDay.format(ovuDate)}';
+                  } else if (ovuRef != null) {
+                    final s = ovuRef.subtract(const Duration(days: 5));
+                    final e = ovuRef.add(const Duration(days: 1));
+                    ovuSummary =
+                        'Est. fertile ${fmtDay.format(s)} – ${fmtDay.format(e)}';
+                  } else {
+                    ovuSummary = 'Log periods to unlock estimates';
+                  }
+                  // Week-planner inputs: profile typicals + luteal signals
+                  // from the user's own symptom history.
+                  final profileData = userProfileAsync.valueOrNull?['data']
+                      as Map<String, dynamic>?;
+                  final typicalCycle =
+                      (profileData?['typicalCycleLength'] as num?)
+                              ?.toInt() ??
+                          28;
+                  final typicalPeriod =
+                      (profileData?['typicalPeriodLength'] as num?)
+                              ?.toInt() ??
+                          5;
+                  // Planner inputs are best-effort: any failure here must
+                  // never take down the dashboard — fall back to calm days.
+                  // Shared helper (also used by the nudge sync) so the
+                  // card and the notification can never disagree.
+                  final clinData = clinicalAsync.valueOrNull;
+                  final clinLogs = clinData?['logs'];
+                  final lutealSignals = lutealSignalsFrom(
+                    logs: clinLogs is List<DailyLog> ? clinLogs : null,
+                    profile:
+                        clinData?['user'] as Map<String, dynamic>?,
+                    fromCache: clinData?['fromCache'] == true,
+                  );
+                  List<PlannedDay> plannedDays;
+                  bool plannedPersonal;
+                  try {
+                    final planned = planWeek(
+                      today: DateTime.now(),
+                      currentDay: currentDay is int
+                          ? currentDay
+                          : int.tryParse('$currentDay') ?? 1,
+                      typicalCycleLength: typicalCycle,
+                      typicalPeriodLength: typicalPeriod,
+                      nextPeriod: nextPeriod,
+                      ovulationDate: ovuDate,
+                      ovulationLocked: isOvulationLocked,
+                      lutealSignals: lutealSignals,
+                    );
+                    plannedDays = planned.days;
+                    plannedPersonal = planned.personalized;
+                  } catch (_) {
+                    final base = DateTime.now();
+                    plannedDays = List.generate(
+                      7,
+                      (i) => PlannedDay(
+                        date: DateTime(base.year, base.month, base.day)
+                            .add(Duration(days: i)),
+                        cycleDay: 1 + i,
+                        energy: DayEnergy.calm,
+                        reasons: const ['Steady days'],
+                      ),
+                    );
+                    plannedPersonal = false;
+                  }
 
                   return Column(
                     children: [
@@ -521,51 +894,66 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         ),
                       ],
 
-                      // Circular Cycle Wheel
+                      // Cycle odometer: per-day phase ring + needle on today.
+                      // Ovulation anchor as a 1-based cycle day; the mapper
+                      // degrades stale/out-of-range anchors to the estimate.
                       ScaleFadeIn(
                         delay: const Duration(milliseconds: 150),
-                        child: Container(
-                        width: 300,
-                        height: 300,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          gradient: const SweepGradient(
-                            colors: [
-                              Color(0xFFE53935), // Menses (Red)
-                              Color(0xFFFB8C00), // Ovulation phase (Orange)
-                              Color(0xFF00ACC1), // Luteal phase (Teal)
-                              Color(0xFFE53935),
-                            ],
-                          ),
-                          boxShadow: [
-                            BoxShadow(color: Colors.pink.withValues(alpha: 0.15), blurRadius: 20, offset: const Offset(0, 8)),
-                          ],
+                        child: Builder(
+                          builder: (context) {
+                            final now = DateTime.now();
+                            final todayDay = DateTime(
+                                now.year, now.month, now.day);
+                            final dayNum = currentDay is int
+                                ? currentDay
+                                : int.tryParse('$currentDay') ?? 1;
+                            final anchorOvu = ovuDate ?? ovuRef;
+                            final ovuDayNum = anchorOvu == null
+                                ? null
+                                : dayNum +
+                                    DateTime(
+                                            anchorOvu.year,
+                                            anchorOvu.month,
+                                            anchorOvu.day)
+                                        .difference(todayDay)
+                                        .inDays;
+                            return CycleOdometer(
+                              cycleLen: typicalCycle,
+                              periodLen: typicalPeriod,
+                              ovulationDay: ovuDayNum,
+                              ovulationLocked: isOvulationLocked,
+                              currentDay: dayNum,
+                              dayLabel: 'Today: Day $dayNum',
+                              phaseLabel: phaseName,
+                              statusLabel: isOvulationLocked
+                                  ? 'Ovulation Locked ✓'
+                                  : 'Prepare / Rest / Predict',
+                              statusColor: isOvulationLocked
+                                  ? (Colors.green[700] ?? Colors.green)
+                                  : context.her.muted,
+                            );
+                          },
                         ),
-                        child: Center(
-                          child: Container(
-                            width: 250,
-                            height: 250,
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Colors.white,
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                PulseGlow(
-                                  duration: const Duration(milliseconds: 1600),
-                                  child: Icon(isOvulationLocked ? Icons.lock : Icons.star, color: isOvulationLocked ? Colors.green : const Color(0xFFFFD166), size: 28),
-                                ),
-                                const SizedBox(height: 4),
-                                Text('Today: Day $currentDay', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                                const SizedBox(height: 4),
-                                Text("You're in your\n$phaseName!", textAlign: TextAlign.center, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFFC26D81))),
-                                const SizedBox(height: 4),
-                                Text(isOvulationLocked ? 'Ovulation Locked ✓' : 'Prepare / Rest / Predict', style: TextStyle(fontSize: 12, color: isOvulationLocked ? Colors.green[700] : Colors.grey[600], fontStyle: FontStyle.italic)),
-                              ],
-                            ),
-                          ),
-                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      const FadeSlideIn(
+                        delay: Duration(milliseconds: 180),
+                        child: OdometerLegend(),
+                      ),
+                      const SizedBox(height: 16),
+
+                      // Positive note for today.
+                      FadeSlideIn(
+                        delay: const Duration(milliseconds: 200),
+                        child: Text(
+                          _positiveNote(
+                              phaseName, currentDay, isOvulationLocked),
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontStyle: FontStyle.italic,
+                              height: 1.5,
+                              color: context.her.muted),
                         ),
                       ),
                       const SizedBox(height: 28),
@@ -577,7 +965,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         width: double.infinity,
                         padding: const EdgeInsets.all(20),
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: context.her.card,
                           borderRadius: BorderRadius.circular(20),
                           border: Border.all(color: const Color(0xFFF9C8D2), width: 1.5),
                           boxShadow: [
@@ -588,15 +976,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Row(
-                              children: const [
-                                Icon(Icons.calendar_month, color: Color(0xFFC26D81), size: 20),
-                                SizedBox(width: 8),
-                                Text('Predictions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                              children: [
+                                const Icon(Icons.calendar_month, color: Color(0xFFC26D81), size: 20),
+                                const SizedBox(width: 8),
+                                Text('Predictions', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
                               ],
                             ),
                             const SizedBox(height: 16),
                             if (message != null && alertMessage == null)
-                              Text(message, style: TextStyle(color: Colors.grey[600]))
+                              Text(message, style: TextStyle(color: context.her.muted))
                             else if (nextPeriod != null)
                               Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -606,7 +994,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                       children: [
                                         const Text('🩸 ', style: TextStyle(fontSize: 16)),
                                         Expanded(
-                                          child: Text(lastPeriodLine, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF4A4A4A))),
+                                          child: Text(lastPeriodLine, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: context.her.ink)),
                                         ),
                                       ],
                                     ),
@@ -615,25 +1003,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   Row(
                                     children: [
                                       const Text('💧 ', style: TextStyle(fontSize: 16)),
-                                      Text('Next Period in $daysLeft days', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF4A4A4A))),
+                                      Expanded(
+                                        child: Text('Next Period in $daysLeft days', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: context.her.ink)),
+                                      ),
                                     ],
                                   ),
                                   const SizedBox(height: 4),
                                   Padding(
                                     padding: const EdgeInsets.only(left: 24.0),
-                                    child: Text('Predicted: ${DateFormat('MMM dd').format(nextPeriod)} - ${DateFormat('MMM dd').format(nextPeriod.add(const Duration(days: 4)))}', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                                    child: Text('Predicted: ${DateFormat('MMM dd').format(nextPeriod)} - ${DateFormat('MMM dd').format(nextPeriod.add(const Duration(days: 4)))}', style: TextStyle(color: context.her.muted, fontSize: 13)),
                                   ),
                                   const SizedBox(height: 12),
                                   Row(
                                     children: [
                                       const Text('✨ ', style: TextStyle(fontSize: 16)),
-                                      Text(isOvulationLocked ? 'Ovulation Confirmed & Locked' : 'Estimated Ovulation & Fertile Window', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF4A4A4A))),
+                                      Expanded(
+                                        child: Text(isOvulationLocked ? 'Ovulation Confirmed & Locked' : 'Estimated Ovulation & Fertile Window', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: context.her.ink)),
+                                      ),
                                     ],
                                   ),
                                   const SizedBox(height: 4),
                                   Padding(
                                     padding: const EdgeInsets.only(left: 24.0),
-                                    child: Text(isOvulationLocked ? 'Locked based on positive LH test' : 'Fertile window estimated around mid-cycle', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                                    child: Text(isOvulationLocked ? 'Locked based on positive LH test' : 'Fertile window estimated around mid-cycle', style: TextStyle(color: context.her.muted, fontSize: 13)),
                                   ),
                                 ],
                               ),
@@ -641,6 +1033,109 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         ),
                         ),
                       ),
+                      // Ovulation Window Card — tap for the fertile-window popup.
+                      FadeSlideIn(
+                        delay: const Duration(milliseconds: 275),
+                        child: InkWell(
+                          onTap: () => _showOvulationWindow(
+                            locked: isOvulationLocked,
+                            ovulationDate: ovuDate,
+                            nextPeriod: nextPeriod,
+                          ),
+                          borderRadius: BorderRadius.circular(20),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [
+                                  const Color(0xFFC26D81),
+                                  const Color(0xFFC26D81)
+                                      .withValues(alpha: 0.75),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              borderRadius: BorderRadius.circular(20),
+                              boxShadow: [
+                                BoxShadow(
+                                    color: Colors.pink.withValues(alpha: 0.18),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 4)),
+                              ],
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(alpha: 0.25),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: Icon(
+                                      isOvulationLocked
+                                          ? Icons.lock
+                                          : Icons.egg_outlined,
+                                      color: Colors.white,
+                                      size: 22),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Text('Ovulation Window',
+                                          style: TextStyle(
+                                              fontSize: 17,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white)),
+                                      const SizedBox(height: 4),
+                                      Text(ovuSummary,
+                                          style: const TextStyle(
+                                              fontSize: 13,
+                                              color: Colors.white)),
+                                    ],
+                                  ),
+                                ),
+                                const Icon(Icons.chevron_right,
+                                    color: Colors.white70),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Plan With Your Cycle — 7-day outlook from tracked data.
+                      FadeSlideIn(
+                        delay: const Duration(milliseconds: 290),
+                        child: WeekPlannerCard(
+                          days: plannedDays,
+                          personalized: plannedPersonal,
+                        ),
+                      ),
+                      // TTC hero — only while trying-to-conceive mode is on.
+                      if (profileData?['ttcMode'] == true)
+                        FadeSlideIn(
+                          delay: const Duration(milliseconds: 310),
+                          child: Builder(
+                            builder: (context) {
+                              final intimacy = <String>{};
+                              if (clinLogs is List<DailyLog>) {
+                                for (final l in clinLogs) {
+                                  if (l.intimacy) intimacy.add(l.date);
+                                }
+                              }
+                              return TtcHeroCard(
+                                status: ttcStatus(
+                                  today: DateTime.now(),
+                                  ovulationDate: ovuDate,
+                                  nextPeriod: nextPeriod,
+                                  intimacyDates: intimacy,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
                     ],
                   );
                 },
@@ -656,7 +1151,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(18),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: context.her.card,
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(color: const Color(0xFFF9C8D2), width: 1.5),
                     boxShadow: [
@@ -666,6 +1161,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   child: todayLogAsync.when(
                     data: (entry) {
                       final log = entry;
+                      final todayStr = DateFormat('yyyy-MM-dd')
+                          .format(DateTime.now());
+                      final todayLabel =
+                          DateFormat('EEE, MMM dd').format(DateTime.now());
                       final hasAnything = log != null &&
                           (log.period ||
                               log.mood.isNotEmpty ||
@@ -676,13 +1175,93 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               log.painScore > 0 ||
                               log.pelvicPressure ||
                               log.backBowelPain);
+                      final header = Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(9),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [
+                                  Color(0xFFC26D81),
+                                  Color(0xFFE29578),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(Icons.edit_calendar_outlined,
+                                color: Colors.white, size: 20),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("Today's Log",
+                                    style: TextStyle(
+                                        fontSize: 17,
+                                        fontWeight: FontWeight.bold,
+                                        color: context.her.ink)),
+                                Text(todayLabel,
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: context.her.muted)),
+                              ],
+                            ),
+                          ),
+                          InkWell(
+                            onTap: () async {
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                    builder: (_) => DailyLoggingScreen(
+                                        date: todayStr)),
+                              );
+                              ref.invalidate(todayLogProvider);
+                              ref.invalidate(predictionProvider);
+                            },
+                            borderRadius: BorderRadius.circular(20),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFC26D81)
+                                    .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(
+                                  hasAnything ? 'Edit' : 'Log now →',
+                                  style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFFC26D81))),
+                            ),
+                          ),
+                        ],
+                      );
                       if (!hasAnything) {
-                        return const Column(
+                        return Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text("Today's Log", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                            SizedBox(height: 6),
-                            Text('Nothing logged for today yet.', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                            header,
+                            const SizedBox(height: 12),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFC26D81)
+                                    .withValues(alpha: 0.07),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Text(
+                                'Nothing logged for today yet — even a quick mood note makes your predictions smarter. 💗',
+                                style: TextStyle(
+                                    color: context.her.muted,
+                                    fontSize: 13,
+                                    height: 1.5),
+                              ),
+                            ),
                           ],
                         );
                       }
@@ -701,21 +1280,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Row(
-                            children: [
-                              Text("Today's Log ✓", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          ...rows.map((r) => Padding(
-                                padding: const EdgeInsets.only(bottom: 4),
-                                child: Text(r, style: const TextStyle(fontSize: 13, color: Color(0xFF4A4A4A))),
+                          header,
+                          const SizedBox(height: 12),
+                          ...rows.asMap().entries.map((e) => FadeSlideIn(
+                                delay: Duration(
+                                    milliseconds: 350 + e.key * 80),
+                                child: Container(
+                                  width: double.infinity,
+                                  margin:
+                                      const EdgeInsets.only(bottom: 8),
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFC26D81)
+                                        .withValues(alpha: 0.07),
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  child: Text(e.value,
+                                      style: TextStyle(
+                                          fontSize: 13,
+                                          height: 1.4,
+                                          color: context.her.ink)),
+                                ),
                               )),
                         ],
                       );
                     },
-                    loading: () => const Text("Today's Log…", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                    error: (e, st) => const Text("Today's Log", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                    loading: () => Text("Today's Log…", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: context.her.ink)),
+                    error: (e, st) => Text("Today's Log", style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: context.her.ink)),
                   ),
                 ),
               ),
@@ -728,7 +1320,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: context.her.card,
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(color: const Color(0xFFF9C8D2), width: 1.5),
                   boxShadow: [
@@ -739,10 +1331,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
-                      children: const [
-                        Icon(Icons.opacity, color: Color(0xFFC26D81), size: 20),
-                        SizedBox(width: 8),
-                        Text('Mucus Log', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                      children: [
+                        const Icon(Icons.opacity, color: Color(0xFFC26D81), size: 20),
+                        const SizedBox(width: 8),
+                        Text('Mucus Log', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -756,6 +1348,134 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     ),
                   ],
                 ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Learn About Your Cycle — curated educational reads.
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 400),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.menu_book_outlined,
+                            color: Color(0xFFC26D81), size: 20),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text('Learn About Your Cycle',
+                              style: TextStyle(
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.bold,
+                                  color: context.her.ink)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Builder(
+                      builder: (context) {
+                        // Cards grow with the system text scale so large
+                        // accessibility sizes never clip content.
+                        final s = MediaQuery.textScalerOf(context)
+                            .scale(1.0)
+                            .clamp(1.0, 2.0);
+                        return SizedBox(
+                          height: 172 * s,
+                          child: ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: _learnArticles.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(width: 12),
+                            itemBuilder: (context, i) {
+                              final article = _learnArticles[i];
+                              return InkWell(
+                                onTap: () => Navigator.push(
+                                  context,
+                                  MaterialPageRoute(
+                                      builder: (_) =>
+                                          ArticleDetailScreen(
+                                              article: article)),
+                                ),
+                                borderRadius:
+                                    BorderRadius.circular(18),
+                              child: Container(
+                                width: (210 * s).clamp(210.0, 340.0),
+                                padding: const EdgeInsets.all(16),
+                              decoration: BoxDecoration(
+                                color: context.her.card,
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(
+                                    color: const Color(0xFFF9C8D2),
+                                    width: 1.5),
+                                boxShadow: [
+                                  BoxShadow(
+                                      color: Colors.pink
+                                          .withValues(alpha: 0.06),
+                                      blurRadius: 10,
+                                      offset: const Offset(0, 4)),
+                                ],
+                              ),
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(_articleEmoji[i],
+                                          style: const TextStyle(
+                                              fontSize: 26)),
+                                      const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFC26D81)
+                                            .withValues(alpha: 0.12),
+                                        borderRadius:
+                                            BorderRadius.circular(10),
+                                      ),
+                                      child: Text(article.category,
+                                          maxLines: 1,
+                                          overflow:
+                                              TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                              fontSize: 10,
+                                              fontWeight:
+                                                  FontWeight.bold,
+                                              color: Color(0xFFC26D81))),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                                  const SizedBox(height: 8),
+                                  Text(article.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.bold,
+                                          color: context.her.ink)),
+                                  const SizedBox(height: 4),
+                                  Text(article.description,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          fontSize: 12,
+                                          color: context.her.muted)),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 30),
@@ -777,7 +1497,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           margin: const EdgeInsets.symmetric(horizontal: 4),
           padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
           decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFFFFD166) : const Color(0xFFFFF0F2),
+              color: isSelected
+                  ? const Color(0xFFFFD166)
+                  : (Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF3A2A34)
+                      : const Color(0xFFFFF0F2)),
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: isSelected ? const Color(0xFFC26D81) : Colors.transparent),
             boxShadow: isSelected
@@ -790,7 +1514,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: isSelected ? Colors.black : const Color(0xFF4A4A4A),
+              color: isSelected ? Colors.black : context.her.ink,
             ),
           ),
         ),

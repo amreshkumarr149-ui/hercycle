@@ -1,18 +1,22 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hercycle/core/app_theme.dart';
+import 'package:hercycle/core/fertile_window.dart';
+import 'package:hercycle/providers/prediction_provider.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:table_calendar/table_calendar.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:hercycle/core/database_repository.dart';
 import 'package:hercycle/features/logging/daily_logging_screen.dart';
 import 'package:intl/intl.dart';
 
-class CalendarScreen extends StatefulWidget {
+class CalendarScreen extends ConsumerStatefulWidget {
   const CalendarScreen({super.key});
 
   @override
-  State<CalendarScreen> createState() => _CalendarScreenState();
+  ConsumerState<CalendarScreen> createState() => _CalendarScreenState();
 }
 
-class _CalendarScreenState extends State<CalendarScreen> {
+class _CalendarScreenState extends ConsumerState<CalendarScreen> {
   DateTime _focusedDay = DateTime.now();
   DateTime _selectedDay = DateTime.now();
   Set<DateTime> _periodDays = {};
@@ -27,7 +31,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   DateTime _dayOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
   Future<void> _loadMarkers() async {
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return;
     try {
       final logs = await DatabaseRepository().getAllLogs(userId);
@@ -76,7 +80,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   }
 
   Future<String> _detailsFor(String dateStr) async {
-    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = safeCurrentUid();
     if (userId == null) return 'Not logged in.';
     try {
       final log = await DatabaseRepository().getLog(userId, dateStr);
@@ -134,7 +138,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             // Calendar Container
             Container(
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: context.her.card,
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
@@ -178,7 +182,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                 ),
                 calendarStyle: CalendarStyle(
                   todayDecoration: BoxDecoration(
-                    color: const Color(0xFFF9C8D2),
+                    color: context.her.muted.withValues(alpha: 0.3),
                     shape: BoxShape.circle,
                   ),
                   selectedDecoration: BoxDecoration(
@@ -206,7 +210,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
               width: double.infinity,
               padding: const EdgeInsets.all(18),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: context.her.card,
                 borderRadius: BorderRadius.circular(18),
                 boxShadow: [
                   BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 3)),
@@ -221,11 +225,11 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Selected Date', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w500)),
+                          Text('Selected Date', style: TextStyle(fontSize: 12, color: context.her.muted, fontWeight: FontWeight.w500)),
                           const SizedBox(height: 4),
                           Text(
                             DateFormat('MMMM dd, yyyy').format(_selectedDay),
-                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A)),
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink),
                           ),
                         ],
                       ),
@@ -246,16 +250,16 @@ class _CalendarScreenState extends State<CalendarScreen> {
                     future: _detailsFor(selectedDateStr),
                     builder: (context, snapshot) {
                       if (snapshot.connectionState == ConnectionState.waiting) {
-                        return const Text('Loading saved log…', style: TextStyle(color: Colors.grey, fontSize: 13));
+                        return Text('Loading saved log…', style: TextStyle(color: context.her.muted, fontSize: 13));
                       }
                       final text = snapshot.data ?? '';
                       if (text.isEmpty) {
-                        return const Text(
+                        return Text(
                           'Nothing logged yet for this date.',
-                          style: TextStyle(color: Colors.grey, fontSize: 13),
+                          style: TextStyle(color: context.her.muted, fontSize: 13),
                         );
                       }
-                      return Text(text, style: const TextStyle(fontSize: 13, height: 1.6, color: Color(0xFF4A4A4A)));
+                      return Text(text, style: TextStyle(fontSize: 13, height: 1.6, color: context.her.ink));
                     },
                   ),
                 ],
@@ -265,7 +269,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             const SizedBox(height: 24),
 
             // Daily Log Section
-            const Text('Daily Log', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+            Text('Daily Log', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
             const SizedBox(height: 12),
             GridView.count(
               crossAxisCount: 2,
@@ -286,24 +290,30 @@ class _CalendarScreenState extends State<CalendarScreen> {
             const SizedBox(height: 28),
 
             // Cycle Information Section
-            const Text('Cycle Information', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+            Text('Cycle Information', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
             const SizedBox(height: 12),
             _buildInfoCard(
               icon: Icons.water_drop,
               title: 'Period',
               description: 'Your logged and predicted period days for this cycle.',
+              onTap: () => _showPeriodDialog(
+                  ref.watch(predictionProvider).valueOrNull),
             ),
             const SizedBox(height: 12),
             _buildInfoCard(
               icon: Icons.auto_awesome,
               title: 'Fertile Window',
               description: 'Estimated fertile days based on your historical cycle data.',
+              onTap: () => _showFertileDialog(
+                  ref.watch(predictionProvider).valueOrNull),
             ),
             const SizedBox(height: 12),
             _buildInfoCard(
               icon: Icons.circle_outlined,
               title: 'Ovulation',
               description: 'Estimated ovulation day. Estimates may vary from cycle to cycle.',
+              onTap: () => _showOvulationDialog(
+                  ref.watch(predictionProvider).valueOrNull),
             ),
             const SizedBox(height: 40),
           ],
@@ -319,7 +329,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: context.her.card,
           borderRadius: BorderRadius.circular(16),
           boxShadow: [BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 6, offset: const Offset(0, 2))],
         ),
@@ -330,7 +340,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
             Expanded(
               child: Text(
                 title,
-                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: Color(0xFF4A4A4A)),
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13, color: context.her.ink),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
@@ -348,7 +358,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
         width: double.infinity,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: context.her.card,
           borderRadius: BorderRadius.circular(16),
           boxShadow: [BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 6, offset: const Offset(0, 2))],
         ),
@@ -358,48 +368,133 @@ class _CalendarScreenState extends State<CalendarScreen> {
             const SizedBox(width: 12),
             Text(
               title,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF4A4A4A)),
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: context.her.ink),
             ),
             const Spacer(),
-            const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
+            Icon(Icons.arrow_forward_ios, size: 14, color: context.her.muted),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildInfoCard({required IconData icon, required String title, required String description}) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 3))],
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF9C8D2).withValues(alpha: 0.3),
-              shape: BoxShape.circle,
+  void _showInfoDialog(String title, String body) {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(body, style: const TextStyle(fontSize: 14, height: 1.5)),
+            const SizedBox(height: 12),
+            Text(
+              'Estimates vary from cycle to cycle and are for awareness only — not contraception.',
+              style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                  color: dialogContext.her.muted),
             ),
-            child: Icon(icon, color: const Color(0xFFC26D81), size: 20),
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                const SizedBox(height: 4),
-                Text(description, style: TextStyle(fontSize: 13, height: 1.4, color: Colors.grey[600])),
-              ],
-            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Close'),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showPeriodDialog(Map<String, dynamic>? pred) {
+    final fmt = DateFormat('MMM dd');
+    final next = pred?['nextPeriod'] as DateTime?;
+    final daysLeft = pred?['daysUntilNextPeriod'];
+    final start = pred?['periodStart'] as DateTime?;
+    final end = pred?['periodEnd'] as DateTime?;
+    final bleed = pred?['observedBleedDays'];
+    final last = start == null
+        ? 'Last period: not logged yet.'
+        : end == null
+            ? 'Last period started ${fmt.format(start)}.'
+            : 'Last period: ${fmt.format(start)} – ${fmt.format(end)}'
+                '${bleed != null ? ' ($bleed days)' : ''}.';
+    final upcoming = next == null
+        ? 'Next period: log your periods to unlock predictions.'
+        : 'Next period: ${fmt.format(next)} – ${fmt.format(next.add(const Duration(days: 4)))}'
+            '${daysLeft != null ? ' (in $daysLeft days)' : ''}.';
+    _showInfoDialog('Period', '$last\n\n$upcoming');
+  }
+
+  void _showFertileDialog(Map<String, dynamic>? pred) {
+    final fmt = DateFormat('MMM dd');
+    final locked = pred?['isOvulationLocked'] == true;
+    final range = fertileRange(
+      ovulationDate: pred?['ovulationDate'] as DateTime?,
+      nextPeriod: pred?['nextPeriod'] as DateTime?,
+    );
+    final body = range == null
+        ? 'Not enough tracked data yet — log your periods (and LH tests if you use them) to unlock fertile-window estimates.'
+        : '${locked ? 'Confirmed by positive LH test ✓\n\n' : ''}Fertile window: ${fmt.format(range.start)} – ${fmt.format(range.end)}'
+            '${range.isEstimate ? ' (mid-cycle estimate).' : '.'}';
+    _showInfoDialog('Fertile Window', body);
+  }
+
+  void _showOvulationDialog(Map<String, dynamic>? pred) {
+    final fmt = DateFormat('MMM dd');
+    final locked = pred?['isOvulationLocked'] == true;
+    final ovu = pred?['ovulationDate'] as DateTime?;
+    final body = ovu == null
+        ? 'Not enough tracked data yet — log your periods (and LH tests if you use them) to unlock ovulation estimates.'
+        : locked
+            ? 'Ovulation confirmed ✓ for ${fmt.format(ovu)} via positive LH test.'
+            : 'Estimated ovulation: ${fmt.format(ovu)} (mid-cycle estimate).';
+    _showInfoDialog('Ovulation', body);
+  }
+
+  Widget _buildInfoCard(
+      {required IconData icon,
+      required String title,
+      required String description,
+      required VoidCallback onTap}) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(18),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: context.her.card,
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [BoxShadow(color: Colors.pink.withValues(alpha: 0.04), blurRadius: 8, offset: const Offset(0, 3))],
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: context.her.muted.withValues(alpha: 0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: const Color(0xFFC26D81), size: 20),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: context.her.ink)),
+                  const SizedBox(height: 4),
+                  Text(description, style: TextStyle(fontSize: 13, height: 1.4, color: context.her.muted)),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right, color: context.her.muted),
+          ],
+        ),
       ),
     );
   }

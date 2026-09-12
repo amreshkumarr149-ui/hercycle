@@ -5,7 +5,12 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:hercycle/features/auth/login_screen.dart';
 import 'package:hercycle/services/user_service.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:hercycle/core/notification_service.dart';
+import 'package:hercycle/providers/theme_provider.dart';
+import 'package:hercycle/providers/prediction_provider.dart';
+import 'package:hercycle/providers/clinical_data_provider.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -31,7 +36,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   }
 
   Future<void> _setNotifEnabled(bool value) async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) return;
     if (value) {
       final granted = await NotificationService.requestPermission();
@@ -79,7 +84,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       initialTime: TimeOfDay(hour: _notifHour, minute: _notifMinute),
     );
     if (picked == null || !mounted) return;
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) return;
     final prevHour = _notifHour;
     final prevMinute = _notifMinute;
@@ -128,7 +133,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   /// account itself. Data deletion always runs first so tracked records are
   /// gone even if the auth deletion needs a fresh login.
   Future<void> _deleteEverything() async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) return;
     final step1 = await showDialog<bool>(
       context: context,
@@ -240,8 +245,477 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     return '${_fmtDay(start)} → ${_fmtDay(end)} ($days days)';
   }
 
+  static const _bloodGroups = [
+    'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'
+  ];
+  static const _sexOptions = ['Yes', 'No', 'Prefer not to say'];
+
+  /// Writes a partial profile patch with merge semantics (untouched fields
+  /// are preserved server-side, same as [UserService.saveProfile]). Throws
+  /// on failure so callers can keep the edit dialog open with the error.
+  Future<void> _savePatch(Map<String, dynamic> patch) async {
+    final user = safeCurrentUser();
+    if (user == null) throw StateError('You are not logged in.');
+    final encoded = <String, dynamic>{};
+    for (final e in patch.entries) {
+      final v = e.value;
+      if (v == null) {
+        encoded[e.key] = FieldValue.delete();
+      } else if (v is DateTime) {
+        encoded[e.key] = Timestamp.fromDate(v);
+      } else {
+        encoded[e.key] = v;
+      }
+    }
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .set(encoded, SetOptions(merge: true));
+  }
+
+  /// Silent refresh after an edit (no full-screen spinner flash), then
+  /// invalidate everything derived from profile fields.
+  Future<void> _refreshAfterEdit(String message) async {
+    final user = safeCurrentUser();
+    if (user == null || !mounted) return;
+    try {
+      final got = await UserService().getUserDoc(user.uid);
+      if (!mounted) return;
+      setState(() {
+        _userData = got?['data'] as Map<String, dynamic>?;
+        _fromCache = got?['fromCache'] == true;
+      });
+      ref.invalidate(predictionProvider);
+      ref.invalidate(clinicalDataProvider);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved, but refresh failed: ${UserService.friendlyError(e)}')),
+      );
+    }
+  }
+
+  int? _ageOn(DateTime dob, DateTime today) {
+    var age = today.year - dob.year;
+    if (today.month < dob.month ||
+        (today.month == dob.month && today.day < dob.day)) {
+      age--;
+    }
+    return age;
+  }
+
+  String _dobLabel() {
+    final dob = _parseDate(_userData?['dateOfBirth']);
+    if (dob == null) return 'Not specified';
+    final age = _ageOn(
+        DateTime(dob.year, dob.month, dob.day),
+        (() {
+          final n = DateTime.now();
+          return DateTime(n.year, n.month, n.day);
+        })());
+    return '${_fmtDay(dob)} (age $age)';
+  }
+
+  /// Generic text/number edit dialog. [validate] returns an error string or
+  /// null when the raw input is acceptable. The dialog stays open with the
+  /// error shown until input validates AND the save succeeds.
+  Future<void> _editTextField({
+    required String title,
+    required String initial,
+    required TextInputType keyboardType,
+    required String? Function(String) validate,
+    required Map<String, dynamic> Function(String) toPatch,
+    required String successMessage,
+  }) async {
+    final controller = TextEditingController(text: initial);
+    var saved = false;
+    // Hoisted out of the StatefulBuilder so the analyzer sees the mutations.
+    var saving = false;
+    String? error;
+    await showDialog(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setSheet) {
+          return AlertDialog(
+            title: Text(title),
+            content: TextField(
+              controller: controller,
+              keyboardType: keyboardType,
+              autofocus: true,
+              decoration: InputDecoration(
+                border: const OutlineInputBorder(),
+                errorText: error,
+              ),
+              onChanged: (_) {
+                if (error != null) setSheet(() => error = null);
+              },
+            ),
+            actions: [
+              TextButton(
+                onPressed: saving ? null : () => Navigator.pop(d),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: saving
+                    ? null
+                    : () async {
+                        final problem = validate(controller.text.trim());
+                        if (problem != null) {
+                          setSheet(() => error = problem);
+                          return;
+                        }
+                        setSheet(() {
+                          saving = true;
+                          error = null;
+                        });
+                        try {
+                          await _savePatch(toPatch(controller.text.trim()));
+                        } catch (e) {
+                          if (d.mounted) {
+                            setSheet(() {
+                              saving = false;
+                              error = UserService.friendlyError(e);
+                            });
+                          }
+                          return;
+                        }
+                        if (d.mounted) Navigator.pop(d);
+                        saved = true;
+                      },
+                child: saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    controller.dispose();
+    if (saved && mounted) await _refreshAfterEdit(successMessage);
+  }
+
+  /// Choice dialog (blood group, had-sex). Tapping an option saves
+  /// immediately; failures keep the dialog open with the error on top.
+  Future<void> _editChoice({
+    required String title,
+    required String? current,
+    required List<String> options,
+    required String field,
+    required String successMessage,
+  }) async {
+    var saved = false;
+    // Hoisted out of the StatefulBuilder so the analyzer sees the mutations.
+    var saving = false;
+    String? error;
+    await showDialog(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setSheet) {
+          Future<void> pick(String? value) async {
+            if (saving) return;
+            setSheet(() {
+              saving = true;
+              error = null;
+            });
+            try {
+              await _savePatch({field: value});
+            } catch (e) {
+              if (d.mounted) {
+                setSheet(() {
+                  saving = false;
+                  error = UserService.friendlyError(e);
+                });
+              }
+              return;
+            }
+            if (d.mounted) Navigator.pop(d);
+            saved = true;
+          }
+
+          return AlertDialog(
+            title: Text(title),
+            content: SingleChildScrollView(
+              child: RadioGroup<String?>(
+                groupValue: current,
+                onChanged: (v) => pick(v),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(error!,
+                            style: const TextStyle(
+                                color: Color(0xFFC62828), fontSize: 12)),
+                      ),
+                    for (final opt in ['Not specified', ...options])
+                      RadioListTile<String?>(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: Text(opt),
+                        value: opt == 'Not specified' ? null : opt,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: saving ? null : () => Navigator.pop(d),
+                child: const Text('Cancel'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (saved && mounted) await _refreshAfterEdit(successMessage);
+  }
+
+  Future<void> _editName() {
+    final current = _userData?['name']?.toString() ?? '';
+    return _editTextField(
+      title: 'Edit name',
+      initial: current,
+      keyboardType: TextInputType.name,
+      validate: (v) {
+        if (v.isEmpty) return 'Name cannot be empty.';
+        if (v.length > 60) return 'Keep it under 60 characters.';
+        return null;
+      },
+      toPatch: (v) => {'name': v},
+      successMessage: 'Name updated ✓',
+    );
+  }
+
+  Future<void> _editCycleLength() {
+    final current =
+        ((_userData?['typicalCycleLength'] as num?)?.toInt() ?? 28).toString();
+    return _editTextField(
+      title: 'Typical cycle length (days)',
+      initial: current,
+      keyboardType: TextInputType.number,
+      validate: (v) {
+        final n = int.tryParse(v);
+        if (n == null) return 'Enter a whole number.';
+        if (n < 15 || n > 60) return 'Must be between 15 and 60 days.';
+        return null;
+      },
+      toPatch: (v) => {'typicalCycleLength': int.parse(v)},
+      successMessage: 'Cycle length updated — predictions refreshed ✓',
+    );
+  }
+
+  Future<void> _editPeriodLength() {
+    final current =
+        ((_userData?['typicalPeriodLength'] as num?)?.toInt() ?? 5).toString();
+    return _editTextField(
+      title: 'Typical period length (days)',
+      initial: current,
+      keyboardType: TextInputType.number,
+      validate: (v) {
+        final n = int.tryParse(v);
+        if (n == null) return 'Enter a whole number.';
+        if (n < 1 || n > 15) return 'Must be between 1 and 15 days.';
+        return null;
+      },
+      toPatch: (v) => {'typicalPeriodLength': int.parse(v)},
+      successMessage: 'Period length updated — predictions refreshed ✓',
+    );
+  }
+
+  Future<void> _editDob() async {
+    final current = _parseDate(_userData?['dateOfBirth']);
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current ?? today.subtract(const Duration(days: 365 * 25)),
+      firstDate: DateTime(today.year - 120),
+      // No future dates, and at least a plausible minimum age.
+      lastDate: today,
+    );
+    if (picked == null || !mounted) return;
+    final day = DateTime(picked.year, picked.month, picked.day);
+    if (day.isAfter(today)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Date of birth cannot be in the future.')));
+      return;
+    }
+    try {
+      await _savePatch({'dateOfBirth': day});
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not save: ${UserService.friendlyError(e)}')),
+      );
+      return;
+    }
+    await _refreshAfterEdit('Date of birth updated ✓');
+  }
+
+  /// Start + end pickers in one dialog; end must not precede start.
+  /// Clearing the end date deletes it (predictions fall back to the
+  /// typical period length).
+  Future<void> _editLastPeriod() async {
+    var start = _parseDate(_userData?['lastPeriodStartDate']);
+    var end = _parseDate(_userData?['lastPeriodEndDate']);
+    var saved = false;
+    // Hoisted out of the StatefulBuilder so the analyzer sees the mutations.
+    var saving = false;
+    String? error;
+    await showDialog(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, setSheet) {
+          Future<void> pick(bool isStart) async {
+            final picked = await showDatePicker(
+              context: d,
+              initialDate: (isStart ? start : end) ?? DateTime.now(),
+              firstDate: DateTime(2000),
+              lastDate: DateTime.now(),
+            );
+            if (picked == null) return;
+            setSheet(() {
+              if (isStart) {
+                start = DateTime(picked.year, picked.month, picked.day);
+              } else {
+                end = DateTime(picked.year, picked.month, picked.day);
+              }
+              error = null;
+            });
+          }
+
+          return AlertDialog(
+            title: const Text('Last period'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(error!,
+                        style: const TextStyle(
+                            color: Color(0xFFC62828), fontSize: 12)),
+                  ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Start date *'),
+                  trailing: Text(
+                      start == null ? 'Select' : _fmtDay(start!),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  onTap: () => pick(true),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('End date (optional)'),
+                  trailing: Text(end == null ? 'Select' : _fmtDay(end!),
+                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  onTap: () => pick(false),
+                ),
+                if (end != null)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton(
+                      onPressed:
+                          saving ? null : () => setSheet(() => end = null),
+                      child: const Text('Clear end date'),
+                    ),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: saving ? null : () => Navigator.pop(d),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: saving
+                    ? null
+                    : () async {
+                        if (start == null) {
+                          setSheet(() =>
+                              error = 'Pick a start date first.');
+                          return;
+                        }
+                        if (end != null && end!.isBefore(start!)) {
+                          setSheet(() => error =
+                              'End date cannot be before the start date.');
+                          return;
+                        }
+                        setSheet(() {
+                          saving = true;
+                          error = null;
+                        });
+                        try {
+                          await _savePatch({
+                            'lastPeriodStartDate': start!,
+                            'lastPeriodEndDate': end,
+                          });
+                        } catch (e) {
+                          if (d.mounted) {
+                            setSheet(() {
+                              saving = false;
+                              error = UserService.friendlyError(e);
+                            });
+                          }
+                          return;
+                        }
+                        if (d.mounted) Navigator.pop(d);
+                        saved = true;
+                      },
+                child: saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (saved && mounted) {
+      await _refreshAfterEdit('Last period updated — predictions refreshed ✓');
+    }
+  }
+
+  /// Tappable profile row with an edit affordance. Read-only rows should
+  /// use a plain [ListTile] instead so nothing looks editable that isn't.
+  Widget _infoTile({
+    required IconData icon,
+    required String title,
+    required String value,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      leading: Icon(icon, color: const Color(0xFFC26D81)),
+      title: Text(title),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Text(value,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 4),
+          Icon(Icons.edit_outlined, size: 16, color: context.her.muted),
+        ],
+      ),
+      onTap: onTap,
+    );
+  }
+
   Future<void> _loadUserData() async {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) {
       if (mounted) setState(() => _isLoading = false);
       return;
@@ -273,7 +747,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
 
     return Scaffold(
       appBar: AppBar(
@@ -325,88 +799,212 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 Center(
                   child: Text(
                     _userData?['name'] ?? 'User',
-                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A)),
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: context.her.ink),
                   ),
                 ),
                 Center(
                   child: Text(
                     _userData?['email'] ?? user?.email ?? '',
-                    style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+                    style: TextStyle(fontSize: 14, color: context.her.muted),
                   ),
                 ),
                 if (_fromCache)
-                  const Center(
+                  Center(
                     child: Padding(
-                      padding: EdgeInsets.only(top: 4),
+                      padding: const EdgeInsets.only(top: 4),
                       child: Text('Offline mode — showing saved data',
                           style: TextStyle(
                               fontSize: 11,
-                              color: Colors.grey,
+                              color: context.her.muted,
                               fontStyle: FontStyle.italic)),
                     ),
                   ),
                 const SizedBox(height: 32),
-                const Text('Cycle & Health Info', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                Text('Personal Details', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
                 const SizedBox(height: 12),
                 Container(
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: context.her.card,
                     borderRadius: BorderRadius.circular(20),
                     boxShadow: [
                       BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
                     ],
                   ),
                   child: Material(
-                    color: Colors.white,
+                    color: context.her.card,
                     borderRadius: BorderRadius.circular(20),
                     child: Column(
                       children: [
-                      ListTile(
-                        leading: const Icon(Icons.calendar_month, color: Color(0xFFC26D81)),
-                        title: const Text('Typical Cycle Length'),
-                        trailing: Text('${_userData?['typicalCycleLength'] ?? 28} days', style: const TextStyle(fontWeight: FontWeight.bold)),
+                        _infoTile(
+                          icon: Icons.person_outline,
+                          title: 'Name',
+                          value: (_userData?['name']?.toString().isNotEmpty == true)
+                              ? _userData!['name'].toString()
+                              : 'Not specified',
+                          onTap: _editName,
+                        ),
+                        const Divider(height: 1),
+                        _infoTile(
+                          icon: Icons.cake_outlined,
+                          title: 'Date of Birth',
+                          value: _dobLabel(),
+                          onTap: _editDob,
+                        ),
+                        const Divider(height: 1),
+                        ListTile(
+                          leading: const Icon(Icons.email_outlined, color: Color(0xFFC26D81)),
+                          title: const Text('Email'),
+                          subtitle: const Text('Managed by your sign-in account',
+                              style: TextStyle(fontSize: 11)),
+                          trailing: Text(
+                            _userData?['email']?.toString().isNotEmpty == true
+                                ? _userData!['email'].toString()
+                                : (user?.email ?? 'Not specified'),
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text('Cycle & Health Info', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
+                    ],
+                  ),
+                  child: Material(
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    child: Column(
+                      children: [
+                      _infoTile(
+                        icon: Icons.calendar_month,
+                        title: 'Typical Cycle Length',
+                        value: '${(_userData?['typicalCycleLength'] as num?)?.toInt() ?? 28} days',
+                        onTap: _editCycleLength,
                       ),
                       const Divider(height: 1),
-                      ListTile(
-                        leading: const Icon(Icons.water_drop, color: Color(0xFFC26D81)),
-                        title: const Text('Typical Period Length'),
-                        trailing: Text('${_userData?['typicalPeriodLength'] ?? 5} days', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      _infoTile(
+                        icon: Icons.water_drop,
+                        title: 'Typical Period Length',
+                        value: '${(_userData?['typicalPeriodLength'] as num?)?.toInt() ?? 5} days',
+                        onTap: _editPeriodLength,
                       ),
                       const Divider(height: 1),
-                      ListTile(
-                        leading: const Icon(Icons.bloodtype, color: Color(0xFFC26D81)),
-                        title: const Text('Blood Group'),
-                        trailing: Text(_userData?['bloodGroup'] ?? 'Not specified', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      _infoTile(
+                        icon: Icons.bloodtype,
+                        title: 'Blood Group',
+                        value: _userData?['bloodGroup']?.toString() ?? 'Not specified',
+                        onTap: () => _editChoice(
+                          title: 'Blood group',
+                          current: _userData?['bloodGroup']?.toString(),
+                          options: _bloodGroups,
+                          field: 'bloodGroup',
+                          successMessage: 'Blood group updated ✓',
+                        ),
                       ),
                       const Divider(height: 1),
-                      ListTile(
-                        leading: const Icon(Icons.date_range, color: Color(0xFFC26D81)),
-                        title: const Text('Last Period'),
-                        trailing: Text(_lastPeriodLabel(), style: const TextStyle(fontWeight: FontWeight.bold)),
+                      _infoTile(
+                        icon: Icons.date_range,
+                        title: 'Last Period',
+                        value: _lastPeriodLabel(),
+                        onTap: _editLastPeriod,
                       ),
                       const Divider(height: 1),
-                      ListTile(
-                        leading: const Icon(Icons.favorite_border, color: Color(0xFFC26D81)),
-                        title: const Text('Had sex recently'),
-                        trailing: Text(_userData?['hadSexRecently'] ?? 'Not specified', style: const TextStyle(fontWeight: FontWeight.bold)),
+                      _infoTile(
+                        icon: Icons.favorite_border,
+                        title: 'Had sex recently',
+                        value: _userData?['hadSexRecently']?.toString() ?? 'Not specified',
+                        onTap: () => _editChoice(
+                          title: 'Had sex recently',
+                          current: _userData?['hadSexRecently']?.toString(),
+                          options: _sexOptions,
+                          field: 'hadSexRecently',
+                          successMessage: 'Updated ✓',
+                        ),
                       ),
                       ],
                     ),
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text('Reminders', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                Text('Trying to Conceive', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
                 const SizedBox(height: 12),
                 Container(
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: context.her.card,
                     borderRadius: BorderRadius.circular(20),
                     boxShadow: [
                       BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
                     ],
                   ),
                   child: Material(
-                    color: Colors.white,
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    child: SwitchListTile(
+                      secondary: const Icon(Icons.favorite,
+                          color: Color(0xFFC26D81)),
+                      title: const Text('Trying-for-a-baby mode'),
+                      subtitle: const Text(
+                          'Home shows fertile coverage, peak countdown and test-day reminders'),
+                      value: _userData?['ttcMode'] == true,
+                      onChanged: (val) async {
+                        final previous = _userData?['ttcMode'] == true;
+                        setState(() {
+                          _userData = {
+                            ...?_userData,
+                            'ttcMode': val,
+                          };
+                        });
+                        try {
+                          await _savePatch({'ttcMode': val});
+                        } catch (e) {
+                          if (!context.mounted) return;
+                          setState(() {
+                            _userData = {
+                              ...?_userData,
+                              'ttcMode': previous,
+                            };
+                          });
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(
+                                    'Could not save: ${UserService.friendlyError(e)}')),
+                          );
+                          return;
+                        }
+                        if (!context.mounted) return;
+                        ref.invalidate(predictionProvider);
+                        ref.invalidate(clinicalDataProvider);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                              content: Text(val
+                                  ? 'Trying-to-conceive mode on 💗'
+                                  : 'Trying-to-conceive mode off')),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text('Reminders', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
+                    ],
+                  ),
+                  child: Material(
+                    color: context.her.card,
                     borderRadius: BorderRadius.circular(20),
                     child: Column(
                       children: [
@@ -428,6 +1026,34 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           onTap: _notifSaving ? null : _pickNotifTime,
                         ),
                       ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Text('Appearance', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: context.her.ink)),
+                const SizedBox(height: 12),
+                Container(
+                  decoration: BoxDecoration(
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(color: Colors.pink.withValues(alpha: 0.05), blurRadius: 10, offset: const Offset(0, 4)),
+                    ],
+                  ),
+                  child: Material(
+                    color: context.her.card,
+                    borderRadius: BorderRadius.circular(20),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: SegmentedButton<ThemeMode>(
+                        segments: const [
+                          ButtonSegment(value: ThemeMode.system, label: Text('System'), icon: Icon(Icons.settings_suggest_outlined)),
+                          ButtonSegment(value: ThemeMode.light, label: Text('Light'), icon: Icon(Icons.light_mode_outlined)),
+                          ButtonSegment(value: ThemeMode.dark, label: Text('Dark'), icon: Icon(Icons.dark_mode_outlined)),
+                        ],
+                        selected: {ref.watch(themeModeProvider)},
+                        onSelectionChanged: (s) => ref.read(themeModeProvider.notifier).setMode(s.first),
+                      ),
                     ),
                   ),
                 ),

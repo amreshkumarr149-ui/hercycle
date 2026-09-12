@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 
 class Article {
   final String title;
@@ -6,7 +7,7 @@ class Article {
   final String content;
   final String category;
 
-  Article({
+  const Article({
     required this.title,
     required this.description,
     required this.content,
@@ -31,24 +32,24 @@ class ArticleDetailScreen extends StatelessWidget {
           children: [
             Text(
               article.title,
-              style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A)),
+              style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: context.her.ink),
             ),
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: const Color(0xFFF9C8D2).withValues(alpha: 0.2),
+                color: context.her.muted.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Text(
                 article.description,
-                style: const TextStyle(fontSize: 16, fontStyle: FontStyle.italic, color: Color(0xFF7A4A54)),
+                style: TextStyle(fontSize: 16, fontStyle: FontStyle.italic, color: context.her.ink),
               ),
             ),
             const SizedBox(height: 24),
             Text(
               article.content,
-              style: const TextStyle(fontSize: 16, height: 1.6, color: Color(0xFF4A4A4A)),
+              style: TextStyle(fontSize: 16, height: 1.6, color: context.her.ink),
             ),
           ],
         ),

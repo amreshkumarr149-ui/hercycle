@@ -14,6 +14,13 @@ class DailyLog {
   final Map<String, int> symptomIntensity;
   /// Optional free-text note for the day. Omitted from Firestore when empty.
   final String notes;
+  /// SOS episodes: relief name -> times tried / times it helped.
+  /// Empty maps are omitted from Firestore; missing keys mean "not rated".
+  final Map<String, int> reliefTried;
+  final Map<String, int> reliefHelped;
+  /// Trying-to-conceive logging: true when intimacy was logged this day.
+  /// Omitted from Firestore when false.
+  final bool intimacy;
 
   DailyLog({
     required this.date,
@@ -28,7 +35,12 @@ class DailyLog {
     this.backBowelPain = false,
     Map<String, int>? symptomIntensity,
     this.notes = '',
-  }) : symptomIntensity = symptomIntensity ?? const {};
+    Map<String, int>? reliefTried,
+    Map<String, int>? reliefHelped,
+    this.intimacy = false,
+  })  : symptomIntensity = symptomIntensity ?? const {},
+        reliefTried = reliefTried ?? const {},
+        reliefHelped = reliefHelped ?? const {};
 
   static Map<String, int> _parseIntensity(dynamic value) {
     if (value is Map) {
@@ -39,6 +51,20 @@ class DailyLog {
         } else if (v is num) {
           out[k.toString()] = v.toInt().clamp(0, 10);
         }
+      });
+      return out;
+    }
+    return {};
+  }
+
+  /// Non-negative string->int counts; corrupt values (negatives, non-maps,
+  /// non-numbers) degrade to empty rather than crashing or inflating ranks.
+  static Map<String, int> _parseCounts(dynamic value) {
+    if (value is Map) {
+      final out = <String, int>{};
+      value.forEach((k, v) {
+        final n = v is int ? v : (v is num ? v.toInt() : null);
+        if (n != null && n > 0) out[k.toString()] = n;
       });
       return out;
     }
@@ -59,6 +85,9 @@ class DailyLog {
       backBowelPain: data['backBowelPain'] ?? false,
       symptomIntensity: _parseIntensity(data['symptomIntensity']),
       notes: data['notes']?.toString() ?? '',
+      reliefTried: _parseCounts(data['reliefTried']),
+      reliefHelped: _parseCounts(data['reliefHelped']),
+      intimacy: data['intimacy'] == true,
     );
   }
 
@@ -75,7 +104,12 @@ class DailyLog {
       'pelvicPressure': pelvicPressure,
       'backBowelPain': backBowelPain,
       'symptomIntensity': symptomIntensity,
-      if (notes.trim().isNotEmpty) 'notes': notes.trim(),
+      // Notes are always written (even empty) so clearing the field under
+      // merge semantics actually clears it instead of resurrecting text.
+      'notes': notes.trim(),
+      if (reliefTried.isNotEmpty) 'reliefTried': reliefTried,
+      if (reliefHelped.isNotEmpty) 'reliefHelped': reliefHelped,
+      if (intimacy) 'intimacy': true,
     };
   }
 }

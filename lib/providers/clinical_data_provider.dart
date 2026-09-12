@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hercycle/core/disease_risk_screener.dart';
 import 'package:hercycle/models/daily_log.dart';
@@ -15,7 +14,7 @@ import 'package:hercycle/providers/auth_user_provider.dart';
 final clinicalDataProvider =
     FutureProvider<Map<String, dynamic>>((ref) async {
   final user =
-      ref.watch(authUserProvider).value ?? FirebaseAuth.instance.currentUser;
+      ref.watch(authUserProvider).value ?? safeCurrentUser();
   if (user == null) {
     return {
       'risks': <RiskAssessmentResult>[],

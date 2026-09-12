@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hercycle/core/clinical_report_engine.dart';
+import 'package:hercycle/core/telemetry_service.dart';
 
 /// First-report-free, pay-after entitlement for the Deep Insight premium
 /// report. Client-side flag (demo-grade; phase 2 moves enforcement into the
@@ -10,6 +11,24 @@ import 'package:hercycle/core/clinical_report_engine.dart';
 /// - paid: an unused paid receipt exists, open + export without re-prompting
 /// - locked: paywall (pay externally, verify tx id, then open)
 enum PremiumAccess { free, paid, locked }
+
+/// One recorded x402 payment for the "My payments" UI.
+class PremiumReceipt {
+  final String txId;
+  final bool used;
+  final DateTime? createdAt;
+  final int? usdcMicro;
+
+  const PremiumReceipt({
+    required this.txId,
+    required this.used,
+    this.createdAt,
+    this.usdcMicro,
+  });
+
+  String get shortId =>
+      txId.length <= 12 ? txId : '${txId.substring(0, 6)}…${txId.substring(txId.length - 4)}';
+}
 
 class PremiumService {
   PremiumService._();
@@ -108,6 +127,62 @@ class PremiumService {
     } catch (_) {
       return false;
     }
+  }
+
+  /// One recorded payment. Thin read model for the "My payments" UI.
+  /// Never throws (callers get [] on failure, never a crash).
+  ///
+  /// Deliberately orderBy-only (no where clause): single-field ordering
+  /// uses Firestore's automatic indexes, so this query can never fail
+  /// with a missing-composite-index error. Failures are still recorded
+  /// for Crashlytics visibility.
+  static Future<List<PremiumReceipt>> listReceipts(String uid) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .collection('premiumReports')
+          .orderBy('createdAt', descending: true)
+          .limit(20)
+          .get();
+      return receiptsFromMaps(snap.docs.map((d) => d.data()).toList());
+    } catch (e) {
+      await TelemetryService.recordError(e, StackTrace.current,
+          reason: 'receipts-list');
+      return [];
+    }
+  }
+
+  /// Pure mapper: Firestore maps -> newest-first receipts. Corrupt dates
+  /// sort last, corrupt amounts become null. Unit-tested.
+  static List<PremiumReceipt> receiptsFromMaps(
+      List<Map<String, dynamic>> maps) {
+    final out = maps.map((m) {
+      DateTime? at;
+      final raw = m['createdAt'];
+      if (raw is Timestamp) {
+        at = raw.toDate();
+      } else if (raw is String) {
+        at = DateTime.tryParse(raw);
+      }
+      return PremiumReceipt(
+        txId: (m['txId'] ?? '').toString(),
+        used: m['used'] == true,
+        createdAt: at,
+        usdcMicro: (m['usdcMicro'] is num)
+            ? (m['usdcMicro'] as num).toInt()
+            : int.tryParse('${m['usdcMicro'] ?? ''}'),
+      );
+    }).toList();
+    out.sort((a, b) {
+      final at = a.createdAt;
+      final bt = b.createdAt;
+      if (at == null && bt == null) return 0;
+      if (at == null) return 1;
+      if (bt == null) return -1;
+      return bt.compareTo(at);
+    });
+    return out;
   }
 
   /// Records a paid-report receipt (called after a verified x402 payment).

@@ -7,8 +7,10 @@ void main() {
       (WidgetTester tester) async {
     await tester.pumpWidget(const MaterialApp(home: AnimatedSplashScreen()));
 
-    // Opening frame: logo fallback + wordmark exist in tree.
+    // Opening frame: splash + full-artwork logo exist in tree
+    // (the logo carries its own wordmark, so no separate text is drawn).
     expect(find.byType(AnimatedSplashScreen), findsOneWidget);
+    expect(find.byType(Image), findsOneWidget);
 
     // Step through the whole 5s timeline in chunks.
     await tester.pump(const Duration(seconds: 1));
@@ -19,7 +21,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     // Settled final frame still intact.
-    expect(find.text('HerCycle'), findsOneWidget);
+    expect(find.byType(Image), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

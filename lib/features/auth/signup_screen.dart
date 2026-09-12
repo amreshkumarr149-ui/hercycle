@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:hercycle/features/auth/auth_service.dart';
@@ -152,9 +153,9 @@ class _SignupScreenState extends ConsumerState<SignupScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text("Join HerCycle ♡", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+              Text("Join HerCycle ♡", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: context.her.ink)),
               const SizedBox(height: 8),
-              const Text("Track your cycle, symptoms, and wellness in one place.", style: TextStyle(color: Colors.grey)),
+              Text("Track your cycle, symptoms, and wellness in one place.", style: TextStyle(color: context.her.muted)),
               const SizedBox(height: 24),
 
               TextField(

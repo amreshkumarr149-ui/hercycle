@@ -112,6 +112,8 @@ class ClinicalReport {
   final String dataQualityNote;
   final String reliability; // High / Moderate / Low / Insufficient
   final List<String> summaryBullets;
+  final Map<String, int> moods;
+  final List<DailyLog> allLogs;
 
   ClinicalReport({
     required this.userName,
@@ -135,6 +137,8 @@ class ClinicalReport {
     required this.dataQualityNote,
     required this.reliability,
     required this.summaryBullets,
+    required this.moods,
+    required this.allLogs,
   });
 }
 
@@ -253,6 +257,14 @@ class ClinicalReportEngine {
         (entries.isEmpty
             ? 0
             : todayDay.difference(entries.first.date).inDays + 1);
+
+    // ---- Mood distribution ----
+    final moods = <String, int>{};
+    for (final e in entries) {
+      if (e.log.mood.isNotEmpty) {
+        moods[e.log.mood] = (moods[e.log.mood] ?? 0) + 1;
+      }
+    }
 
     CyclePhase phaseOf(CycleRecord c, DateTime day) {
       final bleedEnd = c.start.add(Duration(days: c.bleedingDays));
@@ -1014,6 +1026,8 @@ class ClinicalReportEngine {
       dataQualityNote: qualityNote,
       reliability: reliability,
       summaryBullets: summary,
+      moods: moods,
+      allLogs: entries.map((e) => e.log).toList(),
     );
   }
 

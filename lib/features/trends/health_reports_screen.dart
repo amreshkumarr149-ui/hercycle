@@ -1,6 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
+import 'package:hercycle/core/widgets/animations.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hercycle/core/clinical_report_engine.dart';
@@ -12,6 +15,7 @@ import 'package:hercycle/features/trends/deep_insight_screen.dart';
 import 'package:hercycle/core/disease_risk_screener.dart';
 import 'package:hercycle/models/daily_log.dart';
 import 'package:hercycle/providers/clinical_data_provider.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:printing/printing.dart';
 
 class HealthReportsScreen extends ConsumerStatefulWidget {
@@ -35,7 +39,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
   }
 
   void _refreshAccess() {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = safeCurrentUid();
     _accessFuture = uid == null
         ? Future.value(PremiumAccess.locked)
         : PremiumService.getAccess(uid);
@@ -48,7 +52,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
   }
 
   void _openDeepInsight(bool freeEntry) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = safeCurrentUid();
     if (uid == null) {
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Please log in first.')));
@@ -68,8 +72,10 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
   /// (price / asset / network / payTo). Falls back to the known server
   /// defaults when the server is unreachable.
   void _showPayDialog() {
-    final userData =
-        (ref.read(clinicalDataProvider).value?['user'] as Map<String, dynamic>?);
+    // valueOrNull: the provider may still be loading (or failed offline)
+    // when the dialog opens — .value would throw and crash the tap.
+    final userData = (ref.read(clinicalDataProvider).valueOrNull?['user']
+        as Map<String, dynamic>?);
     final serverController = TextEditingController(
         text: userData?['x402ServerUrl']?.toString() ??
             X402Service.defaultServerUrl);
@@ -79,6 +85,59 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
     final txController = TextEditingController();
     String? verifyMsg;
     bool verifying = false;
+    final dialogUid = safeCurrentUid();
+    final Future<List<PremiumReceipt>>? receiptsFuture =
+        dialogUid == null ? null : PremiumService.listReceipts(dialogUid);
+
+    /// 3-step progress header: Terms → Pay → Verify.
+    Widget paySteps(int active) {
+      const labels = ['Terms', 'Pay', 'Verify'];
+      return Row(
+        children: [
+          for (var i = 0; i < labels.length; i++) ...[
+            if (i > 0)
+              Expanded(
+                child: Container(
+                  height: 2,
+                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                  color: i <= active
+                      ? const Color(0xFFC26D81)
+                      : Colors.grey.shade300,
+                ),
+              ),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: i < active
+                        ? Colors.green
+                        : i == active
+                            ? const Color(0xFFC26D81)
+                            : Colors.grey.shade300,
+                  ),
+                  child: Center(
+                    child: i < active
+                        ? const Icon(Icons.check,
+                            size: 14, color: Colors.white)
+                        : Text('${i + 1}',
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white)),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(labels[i], style: const TextStyle(fontSize: 10)),
+              ],
+            ),
+          ],
+        ],
+      );
+    }
 
     /// Paid externally (any wallet / demo client)? Verify the tx id
     /// on-chain, record the receipt, and open the report directly —
@@ -94,7 +153,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
         verifying = true;
         verifyMsg = null;
       });
-      final uid = FirebaseAuth.instance.currentUser?.uid;
+      final uid = safeCurrentUid();
       if (uid == null) {
         setDialog(() {
           verifying = false;
@@ -142,28 +201,39 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
       _openDeepInsight(false);
     }
 
+    // Rebuild guard: the builder kicks off loadTerms while checking, and
+    // every setDialog rebuilds — without this flag each rebuild would fire
+    // another concurrent 402 POST storm until the first one lands.
+    bool loadingTerms = false;
+
     Future<void> loadTerms(StateSetter setDialog) async {
-      setDialog(() => checking = true);
-      final t = await X402Service.fetchTerms(
-          serverUrl: serverController.text.trim());
-      if (!mounted) return;
-      // Persist the working server URL for next time.
-      final uid = FirebaseAuth.instance.currentUser?.uid;
-      if (uid != null) {
-        try {
-          await FirebaseFirestore.instance
-              .collection('users')
-              .doc(uid)
-              .set({'x402ServerUrl': serverController.text.trim()},
-                  SetOptions(merge: true));
-        } catch (_) {}
+      if (loadingTerms) return;
+      loadingTerms = true;
+      try {
+        setDialog(() => checking = true);
+        final t = await X402Service.fetchTerms(
+            serverUrl: serverController.text.trim());
+        if (!mounted) return;
+        // Persist the working server URL for next time.
+        final uid = safeCurrentUid();
+        if (uid != null) {
+          try {
+            await FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .set({'x402ServerUrl': serverController.text.trim()},
+                    SetOptions(merge: true));
+          } catch (_) {}
+        }
+        if (!mounted) return;
+        setDialog(() {
+          terms = t ?? X402Terms.fallback;
+          live = t != null;
+          checking = false;
+        });
+      } finally {
+        loadingTerms = false;
       }
-      if (!mounted) return;
-      setDialog(() {
-        terms = t ?? X402Terms.fallback;
-        live = t != null;
-        checking = false;
-      });
     }
 
     showDialog(
@@ -175,29 +245,105 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
             loadTerms(setDialog);
           }
           final shown = terms ?? X402Terms.fallback;
+          final step = checking ? 0 : (verifying ? 2 : 1);
           return AlertDialog(
-            title: const Text('Unlock Deep Insight ★'),
+            title: Row(
+              children: [
+                const Expanded(
+                    child: Text('Unlock Deep Insight ★')),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: (live ? Colors.green : Colors.orange)
+                        .withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    checking ? '…' : (live ? 'LIVE' : 'OFFLINE'),
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: live
+                            ? Colors.green.shade700
+                            : Colors.orange.shade800),
+                  ),
+                ),
+              ],
+            ),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('Price',
-                          style: TextStyle(fontWeight: FontWeight.bold)),
-                      Text(PremiumService.priceInr,
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 20,
-                              color: Color(0xFFC26D81))),
-                    ],
+                  paySteps(step),
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [
+                          Color(0xFF8E3A5B),
+                          Color(0xFFC26D81)
+                        ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(shown.price,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 22,
+                                    color: Colors.white)),
+                            const Spacer(),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white
+                                    .withValues(alpha: 0.2),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Text(shown.networkLabel,
+                                  style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12)),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                            '≈ ${PremiumService.priceInr} • ${shown.asset}${live ? ' • live from server' : ''}',
+                            style: const TextStyle(
+                                color: Colors.white70, fontSize: 12)),
+                        if (shown.facilitator.isNotEmpty)
+                          Text('Settled via ${shown.facilitator}',
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 11)),
+                        if (shown.isMainnet)
+                          const Row(
+                            children: [
+                              Icon(Icons.warning_amber_rounded,
+                                  size: 14, color: Colors.amber),
+                              SizedBox(width: 4),
+                              Text('Real MainNet funds — double-check!',
+                                  style: TextStyle(
+                                      color: Colors.amber,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                      ],
+                    ),
                   ),
-                  Text(
-                      '≈ ${PremiumService.priceUsdc} on Algorand TestNet${live ? ' — live from server' : ''}',
-                      style:
-                          TextStyle(fontSize: 12, color: Colors.grey[600])),
                   const SizedBox(height: 12),
                   TextField(
                     controller: serverController,
@@ -222,9 +368,9 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                     width: double.infinity,
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: const Color(0xFFF9F9F9),
+                      color: dialogContext.her.card,
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.grey.shade300),
+                      border: Border.all(color: dialogContext.her.muted.withValues(alpha: 0.3)),
                     ),
                     child: checking
                         ? const Text('Reading live 402 terms…',
@@ -255,6 +401,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                     icon: const Icon(Icons.copy, size: 16),
                                     padding: EdgeInsets.zero,
                                     constraints: const BoxConstraints(),
+                                    tooltip: 'Copy merchant address',
                                     onPressed: () {
                                       Clipboard.setData(ClipboardData(
                                           text: shown.payTo));
@@ -265,23 +412,45 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                                   'Merchant address copied')));
                                     },
                                   ),
+                                  IconButton(
+                                    icon: const Icon(
+                                        Icons.open_in_new, size: 16),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(),
+                                    tooltip:
+                                        'Copy block-explorer link',
+                                    onPressed: () {
+                                      final url =
+                                          X402Service.explorerAccountUrl(
+                                              shown.network,
+                                              shown.payTo);
+                                      if (url == null) return;
+                                      Clipboard.setData(
+                                          ClipboardData(text: url));
+                                      ScaffoldMessenger.of(
+                                              dialogContext)
+                                          .showSnackBar(const SnackBar(
+                                              content: Text(
+                                                  'Explorer link copied')));
+                                    },
+                                  ),
                                 ],
                               ),
                               if (!live)
-                                const Text(
+                                Text(
                                   'Server unreachable — showing last-known terms. Start it with server/README.',
                                   style: TextStyle(
                                       fontSize: 11,
                                       fontStyle: FontStyle.italic,
-                                      color: Colors.grey),
+                                      color: dialogContext.her.muted),
                                 ),
                             ],
                           ),
                   ),
                   const SizedBox(height: 12),
-                  const Text(
-                    'One payment unlocks one fresh 6-month Deep Insight report. Fund the payer wallet with TestNet USDC, run the demo client (server/README), and the facilitator settles it — receipt appears on the TestNet explorer.',
-                    style: TextStyle(fontSize: 12, height: 1.5),
+                  Text(
+                    'One payment unlocks one fresh 6-month Deep Insight report. Fund the payer wallet with ${shown.networkLabel} USDC, run the demo client (server/README), and the facilitator settles it — the receipt is verifiable on the block explorer.',
+                    style: const TextStyle(fontSize: 12, height: 1.5),
                   ),
                   const SizedBox(height: 12),
                   const Divider(),
@@ -322,6 +491,117 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                           : 'Verify payment & open report'),
                     ),
                   ),
+                  if (receiptsFuture != null) ...[
+                    const SizedBox(height: 8),
+                    FutureBuilder<List<PremiumReceipt>>(
+                      future: receiptsFuture,
+                      builder: (c, snap) {
+                        final items = snap.data ?? const <PremiumReceipt>[];
+                        if (!snap.hasData || items.isEmpty) {
+                          return const SizedBox.shrink();
+                        }
+                        return ExpansionTile(
+                          tilePadding: EdgeInsets.zero,
+                          title: Text('My payments (${items.length})',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13)),
+                          children: [
+                            for (final r in items)
+                              Padding(
+                                padding:
+                                    const EdgeInsets.only(bottom: 8),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: (r.used
+                                                ? Colors.grey
+                                                : Colors.green)
+                                            .withValues(alpha: 0.15),
+                                        borderRadius:
+                                            BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                          r.used ? 'USED' : 'READY',
+                                          style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: r.used
+                                                  ? Colors.grey.shade700
+                                                  : Colors.green
+                                                      .shade700)),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(r.shortId,
+                                              style: const TextStyle(
+                                                  fontSize: 12,
+                                                  fontFamily: 'monospace')),
+                                          if (r.createdAt != null)
+                                            Text(
+                                                '${r.createdAt!.year}-${r.createdAt!.month.toString().padLeft(2, '0')}-${r.createdAt!.day.toString().padLeft(2, '0')}',
+                                                style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: dialogContext.her.muted)),
+                                        ],
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.copy,
+                                          size: 16),
+                                      padding: EdgeInsets.zero,
+                                      constraints:
+                                          const BoxConstraints(),
+                                      tooltip: 'Copy transaction id',
+                                      onPressed: () {
+                                        Clipboard.setData(ClipboardData(
+                                            text: r.txId));
+                                        ScaffoldMessenger.of(
+                                                dialogContext)
+                                            .showSnackBar(
+                                                const SnackBar(
+                                                    content: Text(
+                                                        'Transaction id copied')));
+                                      },
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(
+                                          Icons.open_in_new, size: 16),
+                                      padding: EdgeInsets.zero,
+                                      constraints:
+                                          const BoxConstraints(),
+                                      tooltip:
+                                          'Copy block-explorer link',
+                                      onPressed: () {
+                                        final url = X402Service
+                                            .explorerTxUrl(
+                                                shown.network, r.txId);
+                                        if (url == null) return;
+                                        Clipboard.setData(
+                                            ClipboardData(text: url));
+                                        ScaffoldMessenger.of(
+                                                dialogContext)
+                                            .showSnackBar(
+                                                const SnackBar(
+                                                    content: Text(
+                                                        'Explorer link copied')));
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -383,7 +663,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
   @override
   Widget build(BuildContext context) {
     const primaryColor = Color(0xFFC26D81);
-    const ink = Color(0xFF4A4A4A);
+    final her = context.her;
     final reportAsync = ref.watch(clinicalDataProvider);
 
     return Scaffold(
@@ -542,13 +822,13 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _kv('Name', report.userName),
-                    _kv('Age', report.age),
-                    _kv('Report date', report.generatedDate),
-                    _kv('Reporting period', report.windowLabel),
-                    _kv('Tracking history', report.trackingDuration),
-                    _kv('Tracking mode', report.trackingMode),
-                    _kv('Confidential Medical Record Summary',
+                    _kv(her, 'Name', report.userName),
+                    _kv(her, 'Age', report.age),
+                    _kv(her, 'Report date', report.generatedDate),
+                    _kv(her, 'Reporting period', report.windowLabel),
+                    _kv(her, 'Tracking history', report.trackingDuration),
+                    _kv(her, 'Tracking mode', report.trackingMode),
+                    _kv(her, 'Confidential Medical Record Summary',
                         'Private to the user'),
                   ],
                 ),
@@ -559,13 +839,13 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 width: double.infinity,
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFFF3E0),
+                  color: Colors.orange.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(color: Colors.orange.shade200),
                 ),
-                child: const Text(
+                child: Text(
                   'MEDICAL DISCLAIMER — This report is generated automatically from user-entered symptoms, cycle history, and physiological tracking data. HerCycle is an educational and health-tracking tool and is not a substitute for professional medical diagnosis, treatment, or medical advice.',
-                  style: TextStyle(fontSize: 12, height: 1.5, color: ink),
+                  style: TextStyle(fontSize: 12, height: 1.5, color: her.ink),
                 ),
               ),
               const SizedBox(height: 20),
@@ -603,7 +883,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                 Text(b.reference,
                                     style: TextStyle(
                                         fontSize: 12,
-                                        color: Colors.grey[600])),
+                                        color: her.muted)),
                               ],
                             ),
                           ))
@@ -619,16 +899,16 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     if (report.patterns.isEmpty)
-                      const Text(
+                      Text(
                           'No tracked patterns crossed screening thresholds in this period.',
                           style:
-                              TextStyle(color: Colors.grey, fontSize: 13)),
+                              TextStyle(color: her.muted, fontSize: 13)),
                     ...report.patterns.map((p) => Container(
                           width: double.infinity,
                           margin: const EdgeInsets.only(bottom: 12),
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFFFF9F9),
+                            color: Colors.pink.withValues(alpha: 0.06),
                             borderRadius: BorderRadius.circular(14),
                             border:
                                 Border.all(color: Colors.orange.shade200),
@@ -642,14 +922,14 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                       fontSize: 13,
                                       color: primaryColor)),
                               const SizedBox(height: 6),
-                              _patternLine('Algorithm trigger', p.trigger),
-                              _patternLine(
+                              _patternLine(her, 'Algorithm trigger', p.trigger),
+                              _patternLine(her,
                                   'Observations', p.observations),
-                              _patternLine('Cycles affected',
+                              _patternLine(her, 'Cycles affected',
                                   '${p.cycleCount} • ${p.dates.take(4).join(', ')}'),
-                              _patternLine(
+                              _patternLine(her,
                                   'Clinical context', p.context),
-                              _patternLine(
+                              _patternLine(her,
                                   'Recommended next step', p.nextStep),
                             ],
                           ),
@@ -663,12 +943,12 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                           margin: const EdgeInsets.only(bottom: 10),
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: Colors.white,
+                            color: her.card,
                             borderRadius: BorderRadius.circular(14),
                             border: Border.all(
                                 color: risk.isFlagged
                                     ? Colors.red.shade300
-                                    : Colors.grey.shade200),
+                                    : her.muted.withValues(alpha: 0.3)),
                           ),
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -695,7 +975,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                     Text(risk.description,
                                         style: TextStyle(
                                             fontSize: 12,
-                                            color: Colors.grey[700],
+                                            color: her.muted,
                                             height: 1.4)),
                                   ],
                                 ),
@@ -712,8 +992,8 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 icon: Icons.view_timeline_outlined,
                 title: '3. Detailed Cycle Phase Logs',
                 child: report.cycles.isEmpty
-                    ? const Text('No tracked cycles in this period.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                    ? Text('No tracked cycles in this period.',
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         children: report.cycles.reversed.map((c) {
                           final ovuLabel = c.ovulationConfirmed
@@ -725,7 +1005,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                             margin: const EdgeInsets.only(bottom: 8),
                             decoration: BoxDecoration(
                               border:
-                                  Border.all(color: Colors.grey.shade200),
+                                  Border.all(color: her.muted.withValues(alpha: 0.3)),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: ExpansionTile(
@@ -788,14 +1068,30 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                       ),
               ),
 
+              // ---- VISUAL: CYCLE LENGTH & BLEEDING ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 120),
+                child: _cycleBarCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
+              // ---- VISUAL: CYCLE PHASE PIE ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 160),
+                child: _phasePieCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
               // ---- 4. TRENDS ----
               SectionCard(
                 icon: Icons.trending_up,
                 title: '4. Trend Analysis',
                 child: report.trends.isEmpty
-                    ? const Text(
+                    ? Text(
                         'Not enough complete cycles to compare trends.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         children: report.trends
                             .map((t) => Padding(
@@ -825,7 +1121,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                                 style: TextStyle(
                                                     fontSize: 12,
                                                     color:
-                                                        Colors.grey[600])),
+                                                        her.muted)),
                                           ],
                                         ),
                                       ),
@@ -841,8 +1137,8 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 icon: Icons.summarize_outlined,
                 title: '5. Symptom Summary',
                 child: report.symptoms.isEmpty
-                    ? const Text('No symptoms logged in this period.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                    ? Text('No symptoms logged in this period.',
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         children: report.symptoms
                             .map((s) => Padding(
@@ -867,7 +1163,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                                                 style: TextStyle(
                                                     fontSize: 12,
                                                     color:
-                                                        Colors.grey[600])),
+                                                        her.muted)),
                                           ],
                                         ),
                                       ),
@@ -882,14 +1178,54 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                       ),
               ),
 
+              // ---- VISUAL: SYMPTOM SHARE PIE ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 200),
+                child: _symptomPieCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
+              // ---- VISUAL: MOOD SPLIT PIE ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 240),
+                child: _moodPieCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
+              // ---- VISUAL: FLOW INTENSITY BARS ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 280),
+                child: _flowBarCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
+              // ---- VISUAL: MOOD TREND ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 320),
+                child: _moodTrendCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
+              // ---- VISUAL: PAIN TREND ----
+              FadeSlideIn(
+                delay: const Duration(milliseconds: 360),
+                child: _painTrendCard(report),
+              ),
+
+              const SizedBox(height: 24),
+
               // ---- 6. INSIGHTS ----
               SectionCard(
                 icon: Icons.lightbulb_outline,
                 title: '6. Personalized Insights',
                 child: report.insights.isEmpty
-                    ? const Text(
+                    ? Text(
                         'Not enough tracked data for personalized insights yet — keep logging daily.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: report.insights
@@ -938,8 +1274,8 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 icon: Icons.flag_outlined,
                 title: '7. Health Attention Flags',
                 child: report.attentionFlags.isEmpty
-                    ? const Text('No attention flags in this period.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                    ? Text('No attention flags in this period.',
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: report.attentionFlags
@@ -961,10 +1297,10 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _kv('Cycles analysed', '${report.cyclesAnalyzed}'),
-                    _kv('Days logged',
+                    _kv(her, 'Cycles analysed', '${report.cyclesAnalyzed}'),
+                    _kv(her, 'Days logged',
                         '${report.daysLogged} of ~${report.spanDays} days'),
-                    _kv('Reliability', report.reliability),
+                    _kv(her, 'Reliability', report.reliability),
                     const SizedBox(height: 6),
                     Text(report.dataQualityNote,
                         style: const TextStyle(fontSize: 13, height: 1.5)),
@@ -1051,9 +1387,9 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                     ),
                     const SizedBox(height: 12),
                     if (filtered.isEmpty)
-                      const Text('No logs match this search.',
+                      Text('No logs match this search.',
                           style:
-                              TextStyle(color: Colors.grey, fontSize: 13))
+                              TextStyle(color: her.muted, fontSize: 13))
                     else
                       ...filtered.take(60).map((log) {
                         final syms = log.symptoms.map((s) {
@@ -1081,26 +1417,26 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                           margin: const EdgeInsets.only(bottom: 10),
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFFFF9F9),
+                            color: Colors.pink.withValues(alpha: 0.06),
                             borderRadius: BorderRadius.circular(14),
                             border:
-                                Border.all(color: Colors.grey.shade200),
+                                Border.all(color: her.muted.withValues(alpha: 0.3)),
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(log.date,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFF4A4A4A),
+                                      color: her.ink,
                                       fontSize: 13)),
                               const SizedBox(height: 4),
                               Text(
                                   details.isEmpty ? 'Empty log.' : details,
-                                  style: const TextStyle(
+                                  style: TextStyle(
                                       fontSize: 12,
                                       height: 1.6,
-                                      color: Color(0xFF4A4A4A))),
+                                      color: her.ink)),
                             ],
                           ),
                         );
@@ -1109,7 +1445,7 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
                       Text(
                           'Showing latest 60 of ${filtered.length} — the PDF includes all.',
                           style: TextStyle(
-                              fontSize: 12, color: Colors.grey[600])),
+                              fontSize: 12, color: her.muted)),
                   ],
                 ),
               ),
@@ -1193,9 +1529,996 @@ class _HealthReportsScreenState extends ConsumerState<HealthReportsScreen> {
     if (l.notes.trim().isNotEmpty) bits.add('📝 ${l.notes.trim()}');
     return '${l.date} — ${bits.isEmpty ? 'no details' : bits.join(' • ')}';
   }
+
+  static const _pieColors = [
+    Color(0xFFC26D81),
+    Color(0xFFE29578),
+    Color(0xFF83C5BE),
+    Color(0xFFCE93D8),
+    Color(0xFFF9C8D2),
+    Color(0xFF81C784),
+  ];
+
+  static const _moodColors = [
+    Color(0xFFC26D81),
+    Color(0xFFE29578),
+    Color(0xFF83C5BE),
+    Color(0xFFCE93D8),
+    Color(0xFF81C784),
+    Color(0xFF64B5F6),
+    Color(0xFFFFB74D),
+    Color(0xFFA1887F),
+  ];
+
+  static const _phaseColors = {
+    'Menstrual': Color(0xFFE53935),
+    'Follicular': Color(0xFFFB8C00),
+    'Ovulation': Color(0xFF2E9E57),
+    'Luteal': Color(0xFF7B4B94),
+    'Logged': Color(0xFF90A4AE),
+  };
+
+  Widget _chartLegendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(label,
+            style: TextStyle(fontSize: 11, color: context.her.muted)),
+      ],
+    );
+  }
+
+  /// Grouped bars per cycle: total length vs bleeding days. Screen-only.
+  Widget _cycleBarCard(ClinicalReport report) {
+    final cycles =
+        report.cycles.where((c) => c.length != null).toList();
+    if (cycles.length < 2) {
+      return SectionCard(
+        icon: Icons.bar_chart_outlined,
+        title: 'Cycle Length & Bleeding',
+        child: Text(
+            'Log at least 2 complete cycles to see lengths and bleeding days side by side.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final maxLen =
+        cycles.map((c) => c.length!).reduce((a, b) => a > b ? a : b);
+    return SectionCard(
+      icon: Icons.bar_chart_outlined,
+      title: 'Cycle Length & Bleeding',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _chartLegendDot(const Color(0xFFC26D81), 'Cycle days'),
+              const SizedBox(width: 12),
+              _chartLegendDot(const Color(0xFF83C5BE), 'Bleeding days'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 210,
+            child: BarChart(
+              duration: const Duration(milliseconds: 700),
+              curve: Curves.easeOutCubic,
+              BarChartData(
+                maxY: (maxLen + 2).toDouble(),
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color:
+                        context.her.muted.withValues(alpha: 0.25),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(
+                  show: true,
+                  border: Border.all(
+                      color: context.her.muted.withValues(alpha: 0.4)),
+                ),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 30,
+                      getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: TextStyle(
+                            fontSize: 10, color: context.her.muted),
+                      ),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: 1,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= cycles.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            '#${cycles[i].number}',
+                            style: TextStyle(
+                                fontSize: 10,
+                                color: context.her.muted),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                barTouchData: BarTouchData(
+                  enabled: true,
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => context.her.card,
+                    getTooltipItem:
+                        (group, groupIndex, rod, rodIndex) {
+                      final c = cycles[group.x.toInt()];
+                      return BarTooltipItem(
+                        'Cycle #${c.number}\n',
+                        TextStyle(
+                            color: context.her.muted, fontSize: 11),
+                        children: [
+                          TextSpan(
+                            text:
+                                '${c.length} days • 🩸 ${c.bleedingDays}d',
+                            style: TextStyle(
+                                color: context.her.ink,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                barGroups: [
+                  for (var i = 0; i < cycles.length; i++)
+                    BarChartGroupData(
+                      x: i,
+                      barsSpace: 4,
+                      barRods: [
+                        BarChartRodData(
+                          toY: cycles[i].length!.toDouble(),
+                          width: 16,
+                          borderRadius:
+                              const BorderRadius.vertical(
+                                  top: Radius.circular(6)),
+                          gradient: LinearGradient(
+                            colors: [
+                              const Color(0xFFC26D81),
+                              const Color(0xFFC26D81)
+                                  .withValues(alpha: 0.55),
+                            ],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                        ),
+                        BarChartRodData(
+                          toY: cycles[i].bleedingDays.toDouble(),
+                          width: 16,
+                          borderRadius:
+                              const BorderRadius.vertical(
+                                  top: Radius.circular(6)),
+                          gradient: LinearGradient(
+                            colors: [
+                              const Color(0xFF83C5BE),
+                              const Color(0xFF83C5BE)
+                                  .withValues(alpha: 0.55),
+                            ],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Pie of logged days per cycle phase (from tracked cycle records).
+  Widget _phasePieCard(ClinicalReport report) {
+    final counts = <String, int>{};
+    for (final c in report.cycles) {
+      for (final l in c.days) {
+        final d = DateTime.tryParse(l.date);
+        if (d == null) continue;
+        final phase = ClinicalReportEngine.phaseOf(
+            c, DateTime(d.year, d.month, d.day));
+        final label = switch (phase) {
+          CyclePhase.menstrual => 'Menstrual',
+          CyclePhase.follicular => 'Follicular',
+          CyclePhase.ovulation => 'Ovulation',
+          CyclePhase.luteal => 'Luteal',
+          CyclePhase.unknown => 'Logged',
+        };
+        counts[label] = (counts[label] ?? 0) + 1;
+      }
+    }
+    if (counts.isEmpty) {
+      return SectionCard(
+        icon: Icons.pie_chart_outline,
+        title: 'Cycle Phase Distribution',
+        child: Text('Not enough tracked days for a phase split yet.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final total = counts.values.fold(0, (a, b) => a + b);
+    final entries = counts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return SectionCard(
+      icon: Icons.pie_chart_outline,
+      title: 'Cycle Phase Distribution',
+      child: Column(
+        children: [
+          SizedBox(
+            height: 200,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                PieChart(
+                  duration: const Duration(milliseconds: 800),
+                  curve: Curves.easeOutCubic,
+                  PieChartData(
+                    centerSpaceRadius: 44,
+                    sectionsSpace: 3,
+                    startDegreeOffset: -90,
+                    sections: [
+                      for (final e in entries)
+                        PieChartSectionData(
+                          value: e.value.toDouble(),
+                          color: _phaseColors[e.key] ?? Colors.grey,
+                          radius: 54,
+                          title:
+                              '${(e.value * 100 / total).round()}%',
+                          titleStyle: TextStyle(
+                              color: (_phaseColors[e.key] ??
+                                          Colors.grey)
+                                      .computeLuminance() >
+                                  0.55
+                                  ? const Color(0xFF4A4A4A)
+                                  : Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold),
+                        ),
+                    ],
+                  ),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('$total days',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: context.her.ink)),
+                    Text('tracked',
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: context.her.muted)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 6,
+            children: [
+              for (final e in entries)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: _phaseColors[e.key] ?? Colors.grey,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text('${e.key} ${(e.value * 100 / total).toStringAsFixed(1)}%',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: context.her.ink)),
+                  ],
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Pie of symptom share by logged days (top 6). Screen-only.
+  Widget _symptomPieCard(ClinicalReport report) {
+    final top = report.symptoms.take(6).toList();
+    if (top.isEmpty) {
+      return SectionCard(
+        icon: Icons.pie_chart_outline,
+        title: 'Symptom Share',
+        child: Text('No symptoms logged in this period.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final total = top.fold<int>(0, (a, s) => a + s.occurrences);
+    return SectionCard(
+      icon: Icons.pie_chart_outline,
+      title: 'Symptom Share',
+      child: StatefulBuilder(
+        builder: (c, setTouch) {
+          var touched = -1;
+          return Column(
+            children: [
+              SizedBox(
+                height: 200,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    PieChart(
+                      duration: const Duration(milliseconds: 700),
+                      curve: Curves.easeOutCubic,
+                      PieChartData(
+                        centerSpaceRadius: 44,
+                        sectionsSpace: 3,
+                        startDegreeOffset: -90,
+                        pieTouchData: PieTouchData(
+                          touchCallback: (event, response) =>
+                              setTouch(() {
+                            touched = response?.touchedSection
+                                    ?.touchedSectionIndex ??
+                                -1;
+                          }),
+                        ),
+                        sections: [
+                          for (var i = 0; i < top.length; i++)
+                            PieChartSectionData(
+                              value: top[i].occurrences.toDouble(),
+                              color:
+                                  _pieColors[i % _pieColors.length],
+                              radius: touched == i ? 64 : 54,
+                              title: total == 0
+                                  ? ''
+                                  : '${(top[i].occurrences * 100 / total).round()}%',
+                              titleStyle: TextStyle(
+                                  color: _pieColors[
+                                                  i % _pieColors.length]
+                                              .computeLuminance() >
+                                          0.55
+                                      ? const Color(0xFF4A4A4A)
+                                      : Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          touched >= 0 && touched < top.length
+                              ? top[touched].name
+                              : '$total days',
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: context.her.ink),
+                        ),
+                        Text(
+                          touched >= 0 && touched < top.length
+                              ? '${top[touched].occurrences} logged days'
+                              : 'logged',
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: context.her.muted),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (var i = 0; i < top.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color:
+                              _pieColors[i % _pieColors.length],
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(top[i].name,
+                            style:
+                                const TextStyle(fontSize: 12)),
+                      ),
+                      Text('${top[i].occurrences}d',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: context.her.muted)),
+                    ],
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Pie of mood split by logged days. Screen-only.
+  Widget _moodPieCard(ClinicalReport report) {
+    final entries = report.moods.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    if (entries.isEmpty) {
+      return SectionCard(
+        icon: Icons.mood_outlined,
+        title: 'Mood Split',
+        child: Text('No moods logged in this period.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final total = entries.fold<int>(0, (a, e) => a + e.value);
+    return SectionCard(
+      icon: Icons.mood_outlined,
+      title: 'Mood Split',
+      child: Column(
+        children: [
+          SizedBox(
+            height: 200,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                PieChart(
+                  duration: const Duration(milliseconds: 800),
+                  curve: Curves.easeOutCubic,
+                  PieChartData(
+                    centerSpaceRadius: 44,
+                    sectionsSpace: 3,
+                    startDegreeOffset: -90,
+                    sections: [
+                      for (var i = 0; i < entries.length; i++)
+                        PieChartSectionData(
+                          value: entries[i].value.toDouble(),
+                          color:
+                              _moodColors[i % _moodColors.length],
+                          radius: 54,
+                          title:
+                              '${(entries[i].value * 100 / total).round()}%',
+                          titleStyle: TextStyle(
+                              color: _moodColors[
+                                              i % _moodColors.length]
+                                          .computeLuminance() >
+                                      0.55
+                                  ? const Color(0xFF4A4A4A)
+                                  : Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold),
+                        ),
+                    ],
+                  ),
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('$total days',
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                            color: context.her.ink)),
+                    Text('with mood',
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: context.her.muted)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 6,
+            children: [
+              for (var i = 0; i < entries.length; i++)
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color:
+                            _moodColors[i % _moodColors.length],
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                        '${entries[i].key} ${(entries[i].value * 100 / total).toStringAsFixed(1)}%',
+                        style: TextStyle(
+                            fontSize: 12,
+                            color: context.her.ink)),
+                  ],
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Bars of flow-intensity days. Screen-only.
+  Widget _flowBarCard(ClinicalReport report) {
+    final flows = <String, int>{};
+    for (final log in report.allLogs) {
+      if (log.flowIntensity != 'None') {
+        flows[log.flowIntensity] =
+            (flows[log.flowIntensity] ?? 0) + 1;
+      }
+    }
+    const order = ['Spotting', 'Light', 'Medium', 'Heavy'];
+    final items = order.where(flows.containsKey).toList();
+    if (items.isEmpty) {
+      return SectionCard(
+        icon: Icons.water_drop_outlined,
+        title: 'Flow Intensity',
+        child: Text('No flow days logged in this period.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final maxCount =
+        items.map((k) => flows[k]!).reduce((a, b) => a > b ? a : b);
+    return SectionCard(
+      icon: Icons.water_drop_outlined,
+      title: 'Flow Intensity',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _chartLegendDot(const Color(0xFFC26D81), 'Flow days'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 200,
+            child: BarChart(
+              duration: const Duration(milliseconds: 700),
+              curve: Curves.easeOutCubic,
+              BarChartData(
+                maxY: (maxCount + 1).toDouble(),
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color:
+                        context.her.muted.withValues(alpha: 0.25),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(
+                  show: true,
+                  border: Border.all(
+                      color: context.her.muted.withValues(alpha: 0.4)),
+                ),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 30,
+                      getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: TextStyle(
+                            fontSize: 10, color: context.her.muted),
+                      ),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval: 1,
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= items.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            items[i],
+                            style: TextStyle(
+                                fontSize: 10,
+                                color: context.her.muted),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                barTouchData: BarTouchData(
+                  enabled: true,
+                  touchTooltipData: BarTouchTooltipData(
+                    getTooltipColor: (_) => context.her.card,
+                    getTooltipItem:
+                        (group, groupIndex, rod, rodIndex) {
+                      final name = items[group.x.toInt()];
+                      return BarTooltipItem(
+                        '$name\n',
+                        TextStyle(
+                            color: context.her.muted, fontSize: 11),
+                        children: [
+                          TextSpan(
+                            text:
+                                '${flows[name]} day${flows[name] == 1 ? '' : 's'}',
+                            style: TextStyle(
+                                color: context.her.ink,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                barGroups: [
+                  for (var i = 0; i < items.length; i++)
+                    BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: flows[items[i]]!.toDouble(),
+                          width: 30,
+                          borderRadius:
+                              const BorderRadius.vertical(
+                                  top: Radius.circular(8)),
+                          gradient: LinearGradient(
+                            colors: [
+                              const Color(0xFFC26D81),
+                              const Color(0xFFC26D81)
+                                  .withValues(alpha: 0.55),
+                            ],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Multi-line mood presence over the window. Screen-only.
+  Widget _moodTrendCard(ClinicalReport report) {
+    final byDate = <String, Map<String, int>>{};
+    for (final log in report.allLogs) {
+      if (log.mood.isEmpty) continue;
+      byDate
+          .putIfAbsent(log.date, () => {})
+          .update(log.mood, (v) => v + 1, ifAbsent: () => 1);
+    }
+    final dates = byDate.keys.toList()..sort();
+    if (dates.isEmpty) {
+      return SectionCard(
+        icon: Icons.show_chart,
+        title: 'Mood Trend',
+        child: Text('No moods logged in this period.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    final names =
+        byDate.values.expand((m) => m.keys).toSet().toList()..sort();
+    return SectionCard(
+      icon: Icons.show_chart,
+      title: 'Mood Trend',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 12,
+            runSpacing: 6,
+            children: [
+              for (var i = 0; i < names.length; i++)
+                _chartLegendDot(
+                    _moodColors[i % _moodColors.length], names[i]),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 210,
+            child: LineChart(
+              duration: const Duration(milliseconds: 700),
+              curve: Curves.easeOutCubic,
+              LineChartData(
+                minX: 0,
+                maxX: (dates.length - 1).toDouble(),
+                minY: 0,
+                maxY: 1.5,
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color:
+                        context.her.muted.withValues(alpha: 0.25),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(
+                  show: true,
+                  border: Border.all(
+                      color: context.her.muted.withValues(alpha: 0.4)),
+                ),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval:
+                          (dates.length / 4).ceilToDouble().clamp(1, 30),
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= dates.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            dates[i].length >= 10
+                                ? dates[i].substring(5)
+                                : dates[i],
+                            style: TextStyle(
+                                fontSize: 10,
+                                color: context.her.muted),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                lineTouchData: const LineTouchData(enabled: true),
+                lineBarsData: [
+                  for (var m = 0; m < names.length; m++)
+                    LineChartBarData(
+                      spots: [
+                        for (var i = 0; i < dates.length; i++)
+                          FlSpot(
+                            i.toDouble(),
+                            (byDate[dates[i]]?[names[m]] ?? 0)
+                                .toDouble(),
+                          ),
+                      ],
+                      isCurved: true,
+                      color: _moodColors[m % _moodColors.length],
+                      barWidth: 2.5,
+                      dotData:
+                          const FlDotData(show: false),
+                      belowBarData: BarAreaData(
+                        show: true,
+                        color: _moodColors[m % _moodColors.length]
+                            .withValues(alpha: 0.12),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Pain score (0–10) over the window. Screen-only.
+  Widget _painTrendCard(ClinicalReport report) {
+    final points = <String, int>{};
+    for (final log in report.allLogs) {
+      if (log.painScore > 0) points[log.date] = log.painScore;
+    }
+    final dates = points.keys.toList()..sort();
+    if (dates.isEmpty) {
+      return SectionCard(
+        icon: Icons.show_chart,
+        title: 'Pain Trend',
+        child: Text('No pain scores logged in this period.',
+            style: TextStyle(color: context.her.muted, fontSize: 13)),
+      );
+    }
+    return SectionCard(
+      icon: Icons.show_chart,
+      title: 'Pain Trend (0–10)',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _chartLegendDot(
+                  const Color(0xFFE53935), 'Pain score'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            height: 210,
+            child: LineChart(
+              duration: const Duration(milliseconds: 700),
+              curve: Curves.easeOutCubic,
+              LineChartData(
+                minX: 0,
+                maxX: (dates.length - 1).toDouble(),
+                minY: 0,
+                maxY: 10,
+                gridData: FlGridData(
+                  show: true,
+                  drawVerticalLine: false,
+                  getDrawingHorizontalLine: (value) => FlLine(
+                    color:
+                        context.her.muted.withValues(alpha: 0.25),
+                    strokeWidth: 1,
+                  ),
+                ),
+                borderData: FlBorderData(
+                  show: true,
+                  border: Border.all(
+                      color: context.her.muted.withValues(alpha: 0.4)),
+                ),
+                titlesData: FlTitlesData(
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      reservedSize: 30,
+                      interval: 2,
+                      getTitlesWidget: (value, meta) => Text(
+                        value.toInt().toString(),
+                        style: TextStyle(
+                            fontSize: 10, color: context.her.muted),
+                      ),
+                    ),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      interval:
+                          (dates.length / 4).ceilToDouble().clamp(1, 30),
+                      getTitlesWidget: (value, meta) {
+                        final i = value.toInt();
+                        if (i < 0 || i >= dates.length) {
+                          return const SizedBox.shrink();
+                        }
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            dates[i].length >= 10
+                                ? dates[i].substring(5)
+                                : dates[i],
+                            style: TextStyle(
+                                fontSize: 10,
+                                color: context.her.muted),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                lineTouchData: LineTouchData(
+                  enabled: true,
+                  touchTooltipData: LineTouchTooltipData(
+                    getTooltipColor: (_) => context.her.card,
+                    getTooltipItems: (spots) => spots
+                        .map((s) => LineTooltipItem(
+                              '${dates[s.x.toInt()]}\n',
+                              TextStyle(
+                                  color: context.her.muted,
+                                  fontSize: 11),
+                              children: [
+                                TextSpan(
+                                  text:
+                                      '${s.y.toStringAsFixed(0)}/10',
+                                  style: TextStyle(
+                                      color: context.her.ink,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13),
+                                ),
+                              ],
+                            ))
+                        .toList(),
+                  ),
+                ),
+                lineBarsData: [
+                  LineChartBarData(
+                    spots: [
+                      for (var i = 0; i < dates.length; i++)
+                        FlSpot(
+                            i.toDouble(), points[dates[i]]!.toDouble()),
+                    ],
+                    isCurved: true,
+                    color: const Color(0xFFE53935),
+                    barWidth: 3,
+                    dotData: FlDotData(
+                      show: true,
+                      getDotPainter:
+                          (spot, percent, bar, index) =>
+                              FlDotCirclePainter(
+                        radius: 4,
+                        color: context.her.card,
+                        strokeWidth: 2.5,
+                        strokeColor: const Color(0xFFE53935),
+                      ),
+                    ),
+                    belowBarData: BarAreaData(
+                      show: true,
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFFE53935)
+                              .withValues(alpha: 0.30),
+                          const Color(0xFFE53935)
+                              .withValues(alpha: 0.05),
+                        ],
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class SectionCard extends StatelessWidget {
+  // (State class closes here; chart helpers above are State members.)
+
   final IconData icon;
   final String title;
   final Widget child;
@@ -1212,7 +2535,7 @@ class SectionCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.her.card,
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
@@ -1224,7 +2547,7 @@ class SectionCard extends StatelessWidget {
       child: Material(
         // Ink canvas for tiles (e.g. ExpansionTile headers) inside the card:
         // without it the framework throws "ink splashes may be invisible".
-        color: Colors.white,
+        color: context.her.card,
         borderRadius: BorderRadius.circular(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1235,10 +2558,10 @@ class SectionCard extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(title,
-                      style: const TextStyle(
+                      style: TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
-                          color: Color(0xFF4A4A4A))),
+                          color: context.her.ink)),
                 ),
               ],
             ),
@@ -1251,7 +2574,7 @@ class SectionCard extends StatelessWidget {
   }
 }
 
-Widget _kv(String label, String value) {
+Widget _kv(HerCycleColors her, String label, String value) {
   return Padding(
     padding: const EdgeInsets.only(bottom: 6),
     child: Row(
@@ -1260,14 +2583,14 @@ Widget _kv(String label, String value) {
         SizedBox(
           width: 150,
           child: Text(label,
-              style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+              style: TextStyle(fontSize: 12, color: her.muted)),
         ),
         Expanded(
           child: Text(value,
-              style: const TextStyle(
+              style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF4A4A4A))),
+                  color: her.ink)),
         ),
       ],
     ),
@@ -1307,12 +2630,12 @@ Widget _tagChip(String tag) {
   );
 }
 
-Widget _patternLine(String label, String value) {
+Widget _patternLine(HerCycleColors her, String label, String value) {
   return Padding(
     padding: const EdgeInsets.only(bottom: 4),
     child: RichText(
       text: TextSpan(
-        style: const TextStyle(fontSize: 12, height: 1.4, color: Color(0xFF4A4A4A)),
+        style: TextStyle(fontSize: 12, height: 1.4, color: her.ink),
         children: [
           TextSpan(
               text: '$label: ',

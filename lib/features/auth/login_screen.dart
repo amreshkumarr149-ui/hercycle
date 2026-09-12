@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:hercycle/features/auth/auth_service.dart';
@@ -54,7 +55,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                const Text("HerCycle", textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
+                Text("HerCycle", textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: context.her.ink)),
                 const Text("Track • Understand • Feel Better", textAlign: TextAlign.center),
                 const SizedBox(height: 30),
                 

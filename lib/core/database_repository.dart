@@ -11,7 +11,10 @@ class DatabaseRepository {
         .collection('dailyLogs')
         .doc(log.date);
 
-    await docRef.set(log.toFirestore());
+    // Merge semantics: parallel writers (daily form, mucus quick-log, SOS
+    // episodes) each carry only their own fields — overwrite would wipe
+    // the others' data (e.g. logging symptoms after SOS erased reliefs).
+    await docRef.set(log.toFirestore(), SetOptions(merge: true));
 
     // Keep lastPeriodStartDate in sync with period logs (both directions).
     // - period=true on a date >= stored start  -> advance the start.

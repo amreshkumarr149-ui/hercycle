@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hercycle/core/clinical_pdf_builder.dart';
 import 'package:hercycle/core/clinical_report_engine.dart';
@@ -85,6 +86,7 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
   @override
   Widget build(BuildContext context) {
     const primaryColor = Color(0xFFC26D81);
+    final her = context.her;
     final dataAsync = ref.watch(clinicalDataProvider);
 
     return Scaffold(
@@ -151,7 +153,7 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
                                 Text(b.tag,
                                     style: TextStyle(
                                         fontSize: 11,
-                                        color: Colors.grey[600])),
+                                        color: her.muted)),
                               ],
                             ),
                           ))
@@ -162,9 +164,9 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
                 icon: Icons.radar,
                 title: 'Pattern Screening (6 months)',
                 child: report.patterns.isEmpty
-                    ? const Text(
+                    ? Text(
                         'No tracked patterns crossed screening thresholds.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: report.patterns
@@ -195,9 +197,9 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
                 icon: Icons.trending_up,
                 title: 'Irregularity Trends',
                 child: report.trends.isEmpty
-                    ? const Text(
+                    ? Text(
                         'Not enough complete cycles to compare trends.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13))
+                        style: TextStyle(color: her.muted, fontSize: 13))
                     : Column(
                         children: report.trends
                             .map((t) => Padding(
@@ -256,7 +258,7 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
                     Text(
                         'Reliability: ${report.reliability} • ${report.windowLabel}',
                         style: TextStyle(
-                            fontSize: 12, color: Colors.grey[600])),
+                            fontSize: 12, color: her.muted)),
                   ],
                 ),
               ),
@@ -278,11 +280,11 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              const Center(
+              Center(
                 child: Text('Confidential Medical Record Summary',
                     style: TextStyle(
                         fontSize: 11,
-                        color: Colors.grey,
+                        color: her.muted,
                         fontStyle: FontStyle.italic)),
               ),
             ],
@@ -346,7 +348,7 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
       margin: const EdgeInsets.only(bottom: 16),
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.her.card,
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
@@ -364,10 +366,10 @@ class _DeepInsightScreenState extends ConsumerState<DeepInsightScreen> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(title,
-                    style: const TextStyle(
+                    style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.bold,
-                        color: Color(0xFF4A4A4A))),
+                        color: context.her.ink)),
               ),
             ],
           ),

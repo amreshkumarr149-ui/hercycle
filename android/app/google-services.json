@@ -12,7 +12,28 @@
           "package_name": "com.example.hercycle"
         }
       },
-      "oauth_client": [],
+      "oauth_client": [
+        {
+          "client_id": "673908405697-dpss325ck0uj0u98l78b8vk4utvb30q2.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.hercycle",
+            "certificate_hash": "c2b041a8efcc519ad7208140350632d32332d3c9"
+          }
+        },
+        {
+          "client_id": "673908405697-sc2lt7a7j9e2boe9iqe1caqao66rq1te.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.hercycle",
+            "certificate_hash": "ed7ef371526a55160bfe579f28c2d6d0f9badd75"
+          }
+        },
+        {
+          "client_id": "673908405697-af2c8hilq4fndg6ustn2frltmgd094s1.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
       "api_key": [
         {
           "current_key": "AIzaSyDDPAWq60MLS9wQ3r3f05Y-GPOC_dmLBzw"
@@ -20,7 +41,12 @@
       ],
       "services": {
         "appinvite_service": {
-          "other_platform_oauth_client": []
+          "other_platform_oauth_client": [
+            {
+              "client_id": "673908405697-af2c8hilq4fndg6ustn2frltmgd094s1.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
         }
       }
     }

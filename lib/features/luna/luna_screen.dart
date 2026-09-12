@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hercycle/core/widgets/animations.dart';
 import 'package:hercycle/core/luna_service.dart';
@@ -9,6 +9,8 @@ import 'package:hercycle/core/x402_service.dart';
 import 'package:hercycle/models/daily_log.dart';
 import 'package:hercycle/providers/clinical_data_provider.dart';
 import 'package:hercycle/providers/prediction_provider.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
+import 'package:hercycle/providers/luna_persona_provider.dart';
 
 class ChatMessage {
   final String text;
@@ -34,12 +36,21 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scroll = ScrollController();
   bool _typing = false;
-  final List<ChatMessage> _messages = [
-    ChatMessage(
-        text:
-            "Hello! I'm Luna, your cycle assistant. Ask me anything about your recorded cycles, symptoms, or trends! 🌙",
-        isUser: false),
-  ];
+  late final List<ChatMessage> _messages;
+
+  @override
+  void initState() {
+    super.initState();
+    // Greeting matches the saved persona (falls back to default while the
+    // persisted choice loads). Static strings only — no health claims.
+    final persona = ref.read(lunaPersonaProvider);
+    _messages = [
+      ChatMessage(
+          text: LunaPersonas.greetings[persona] ??
+              LunaPersonas.greetings[LunaPersonas.defaultPersona]!,
+          isUser: false),
+    ];
+  }
 
   @override
   void dispose() {
@@ -65,7 +76,7 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
   /// Builds the grounded 90-day summary from live providers. Returns null
   /// when signed out (rule engine handles that case on its own).
   Map<String, dynamic>? _buildSummary() {
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) return null;
     final pred =
         Map<String, dynamic>.from(ref.read(predictionProvider).valueOrNull ?? {});
@@ -103,7 +114,10 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
       final summary = _buildSummary();
       if (summary != null) {
         reply = await LunaService.ask(
-            serverUrl: _serverUrl(), message: clean, summary: summary);
+            serverUrl: _serverUrl(),
+            message: clean,
+            summary: summary,
+            persona: ref.read(lunaPersonaProvider));
         usedAi = reply != null;
       }
     } catch (_) {
@@ -131,7 +145,7 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
         "I'm here to help you understand your cycle. Make sure you log your periods and daily symptoms regularly!";
     final query = text.toLowerCase();
 
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user != null) {
       if (query.contains('period') || query.contains('when')) {
         try {
@@ -184,14 +198,112 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
     return reply;
   }
 
+  void _showPersonaPicker() {
+    final current = ref.watch(lunaPersonaProvider);
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Luna Persona',
+                  style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: context.her.ink)),
+              const SizedBox(height: 4),
+              Text('Tone only — safety and facts never change.',
+                  style: TextStyle(
+                      fontSize: 12, color: context.her.muted)),
+              const SizedBox(height: 12),
+              GridView.count(
+                crossAxisCount: 4,
+                shrinkWrap: true,
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                children: [
+                  for (final id in LunaPersonas.ids)
+                    InkWell(
+                      onTap: () {
+                        ref
+                            .read(lunaPersonaProvider.notifier)
+                            .setPersona(id);
+                        Navigator.pop(sheetContext);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                              content: Text(
+                                  '${LunaPersonas.meta[id]!.$2} mode on ${LunaPersonas.meta[id]!.$1}')),
+                        );
+                      },
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 8, horizontal: 4),
+                        decoration: BoxDecoration(
+                          color: id == current
+                              ? const Color(0xFFC26D81)
+                                  .withValues(alpha: 0.15)
+                              : context.her.card,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: id == current
+                                ? const Color(0xFFC26D81)
+                                : context.her.muted
+                                    .withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(LunaPersonas.meta[id]!.$1,
+                                style:
+                                    const TextStyle(fontSize: 22)),
+                            const SizedBox(height: 2),
+                            Text(LunaPersonas.meta[id]!.$2,
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: id == current
+                                        ? const Color(0xFFC26D81)
+                                        : context.her.ink),
+                                textAlign: TextAlign.center),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final persona = ref.watch(lunaPersonaProvider);
+    final meta = LunaPersonas.meta[persona]!;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Luna Assistant 🌙',
             style: TextStyle(fontWeight: FontWeight.bold)),
         elevation: 0,
         backgroundColor: Colors.transparent,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ActionChip(
+              label: Text('${meta.$1} ${meta.$2}',
+                  style: const TextStyle(fontSize: 12)),
+              onPressed: _showPersonaPicker,
+            ),
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -231,7 +343,7 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
                       decoration: BoxDecoration(
                         color: msg.isUser
                             ? const Color(0xFFC26D81)
-                            : Colors.white,
+                            : context.her.card,
                         borderRadius: BorderRadius.circular(18),
                         boxShadow: [
                           BoxShadow(
@@ -245,7 +357,7 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
                         style: TextStyle(
                           color: msg.isUser
                               ? Colors.white
-                              : const Color(0xFF4A4A4A),
+                              : context.her.ink,
                           fontSize: 15,
                         ),
                       ),
@@ -272,7 +384,7 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
           ),
           Container(
             padding: const EdgeInsets.all(12),
-            color: Colors.white,
+            color: context.her.card,
             child: Row(
               children: [
                 Expanded(

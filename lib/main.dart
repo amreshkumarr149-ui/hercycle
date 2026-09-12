@@ -13,6 +13,7 @@ import 'package:hercycle/features/profile/profile_screen.dart';
 import 'package:hercycle/core/widgets/animations.dart';
 import 'package:hercycle/core/notification_service.dart';
 import 'package:hercycle/core/telemetry_service.dart';
+import 'package:hercycle/providers/theme_provider.dart';
 import 'package:hercycle/features/splash/animated_splash_screen.dart';
 import 'firebase_options.dart';
 
@@ -42,14 +43,14 @@ void main() {
   runApp(const ProviderScope(child: HerCycleApp()));
 }
 
-class HerCycleApp extends StatefulWidget {
+class HerCycleApp extends ConsumerStatefulWidget {
   const HerCycleApp({super.key});
 
   @override
-  State<HerCycleApp> createState() => _HerCycleAppState();
+  ConsumerState<HerCycleApp> createState() => _HerCycleAppState();
 }
 
-class _HerCycleAppState extends State<HerCycleApp> {
+class _HerCycleAppState extends ConsumerState<HerCycleApp> {
   bool _ready = false;
 
   @override
@@ -72,7 +73,9 @@ class _HerCycleAppState extends State<HerCycleApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'HerCycle',
-      theme: AppTheme.theme,
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: ref.watch(themeModeProvider),
       routes: {
         '/home': (context) => const MainNavigation(),
         '/login': (context) => const LoginScreen(),
@@ -82,29 +85,53 @@ class _HerCycleAppState extends State<HerCycleApp> {
   }
 }
 
+/// Firebase access is never assumed: `_bootApp` deliberately proceeds when
+/// backend init fails (offline / misconfigured), and `FirebaseAuth.instance`
+/// throws in that state. These helpers degrade to "logged out" instead.
+Stream<User?>? _safeAuthStream() {
+  try {
+    return FirebaseAuth.instance.authStateChanges();
+  } catch (_) {
+    return null;
+  }
+}
+
+User? _safeCurrentUser() {
+  try {
+    return FirebaseAuth.instance.currentUser;
+  } catch (_) {
+    return null;
+  }
+}
+
 class _AuthGate extends StatelessWidget {
   const _AuthGate();
 
   @override
   Widget build(BuildContext context) {
+    final stream = _safeAuthStream();
+    if (stream == null) {
+      // No backend: skip straight to login instead of crashing.
+      return const LoginScreen();
+    }
     return StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        initialData: FirebaseAuth.instance.currentUser,
+        stream: stream,
+        initialData: _safeCurrentUser(),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
-            return const Scaffold(
-              backgroundColor: Color(0xFFFFF0F2),
+            return Scaffold(
+              backgroundColor: Theme.of(context).scaffoldBackgroundColor,
               body: Center(
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    PulseGlow(
+                    const PulseGlow(
                       child: Icon(Icons.favorite, size: 60, color: Color(0xFFC26D81)),
                     ),
-                    SizedBox(height: 16),
-                    Text('HerCycle', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Color(0xFF4A4A4A))),
-                    SizedBox(height: 24),
-                    CircularProgressIndicator(color: Color(0xFFC26D81)),
+                    const SizedBox(height: 16),
+                    Text('HerCycle', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: context.her.ink)),
+                    const SizedBox(height: 24),
+                    const CircularProgressIndicator(color: Color(0xFFC26D81)),
                   ],
                 ),
               ),

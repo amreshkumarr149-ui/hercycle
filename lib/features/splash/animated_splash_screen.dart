@@ -6,9 +6,9 @@ import 'package:flutter/material.dart';
 ///
 /// Timeline mapping (controller 0.0 → 1.0 over 5 seconds):
 /// - 0.00–0.40  gradient wash-in, glow particles drift, cycle ring draws 0→360°
-/// - 0.30–0.50  logo scales in with glow
+/// - 0.30–0.50  logo scales in with glow (full artwork incl. wordmark — the
+///   logo itself carries the brand text, so no separate wordmark is drawn)
 /// - 0.40–0.70  petals orbit once around the logo
-/// - 0.50–0.66  "HerCycle" wordmark fades up
 /// - 0.66–1.00  settle: one gentle pulse, particles fade, clean final frame
 ///
 /// Pure animation — no logic. The parent owns timing and routing.
@@ -38,8 +38,6 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
   late final Animation<double> _logoGlow;
   late final Animation<double> _petalOrbit;
   late final Animation<double> _petalFade;
-  late final Animation<double> _wordOpacity;
-  late final Animation<double> _wordRise;
   late final Animation<double> _settlePulse;
   late final Animation<double> _particleFade;
 
@@ -67,8 +65,6 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
     _logoGlow = _interval(0.30, 0.55);
     _petalOrbit = _interval(0.40, 0.70, curve: Curves.linear);
     _petalFade = _interval(0.66, 0.84);
-    _wordOpacity = _interval(0.50, 0.66);
-    _wordRise = _interval(0.50, 0.66, curve: Curves.easeOutCubic);
     _settlePulse = _interval(0.66, 0.84);
     _particleFade = _interval(0.70, 1.00);
 
@@ -140,20 +136,20 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       SizedBox(
-                        width: 260,
-                        height: 260,
+                        width: 280,
+                        height: 280,
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
                             CustomPaint(
-                              size: const Size(260, 260),
+                              size: const Size(280, 280),
                               painter: _RingPainter(
                                 drawProgress: _ringDraw.value,
                                 spinProgress: _ringSpin.value,
                               ),
                             ),
                             CustomPaint(
-                              size: const Size(260, 260),
+                              size: const Size(280, 280),
                               painter: _PetalPainter(
                                 orbitProgress: _petalOrbit.value,
                                 fade: 1.0 - _petalFade.value * 0.65,
@@ -164,13 +160,13 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
                                   ? 0.01
                                   : (0.8 + 0.2 * _logoScale.value) * pulse,
                               child: Container(
-                                width: 150,
-                                height: 150,
+                                width: 190,
+                                height: 190,
                                 decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
+                                  borderRadius: BorderRadius.circular(44),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: const Color(0xFFF48FB1)
+                                      color: const Color(0xFF9B5BB5)
                                           .withValues(
                                               alpha: 0.55 *
                                                   _logoGlow.value),
@@ -179,10 +175,14 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
                                     ),
                                   ],
                                 ),
-                                child: ClipOval(
+                                // Rounded rect (not circle): the artwork is
+                                // square with its own corners + wordmark —
+                                // nothing may be cropped.
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(44),
                                   child: Image.asset(
                                     'assets/images/logo.png',
-                                    fit: BoxFit.cover,
+                                    fit: BoxFit.contain,
                                     errorBuilder:
                                         (context, error, stackTrace) =>
                                             Container(
@@ -198,23 +198,6 @@ class _AnimatedSplashScreenState extends State<AnimatedSplashScreen>
                               ),
                             ),
                           ],
-                        ),
-                      ),
-                      const SizedBox(height: 18),
-                      Opacity(
-                        opacity: _wordOpacity.value,
-                        child: Transform.translate(
-                          offset: Offset(
-                              0, 16 * (1.0 - _wordRise.value)),
-                          child: const Text(
-                            'HerCycle',
-                            style: TextStyle(
-                              fontSize: 34,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 1.5,
-                              color: Color(0xFF7B4B94),
-                            ),
-                          ),
                         ),
                       ),
                     ],
@@ -276,7 +259,7 @@ class _RingPainter extends CustomPainter {
       math.pi * 2,
       false,
       Paint()
-        ..color = const Color(0xFFF48FB1).withValues(alpha: 0.18)
+        ..color = const Color(0xFF7B4B94).withValues(alpha: 0.15)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 9
         ..strokeCap = StrokeCap.round,
@@ -290,10 +273,10 @@ class _RingPainter extends CustomPainter {
     final shaderPaint = Paint()
       ..shader = const SweepGradient(
         colors: [
-          Color(0xFFF48FB1),
+          Color(0xFF7B4B94),
+          Color(0xFFC26D81),
           Color(0xFFCE93D8),
-          Color(0xFFFFB59E),
-          Color(0xFFF48FB1),
+          Color(0xFF7B4B94),
         ],
       ).createShader(rect)
       ..style = PaintingStyle.stroke
@@ -337,7 +320,7 @@ class _PetalPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (orbitProgress <= 0 || fade <= 0) return;
     final center = Offset(size.width / 2, size.height / 2);
-    const radius = 104.0;
+    const radius = 118.0;
     for (var i = 0; i < 6; i++) {
       final base = (i / 6) * math.pi * 2;
       final angle = base + orbitProgress * math.pi * 2;
@@ -351,7 +334,7 @@ class _PetalPainter extends CustomPainter {
       canvas.drawOval(
         const Rect.fromLTWH(-4, -8, 8, 16),
         Paint()
-          ..color = const Color(0xFFF8BBD0)
+          ..color = const Color(0xFFE1BEE7)
               .withValues(alpha: 0.55 * fade)
           ..maskFilter =
               const MaskFilter.blur(BlurStyle.normal, 2),

@@ -12,6 +12,32 @@ void main() {
     expect(PremiumService.priceInr, '₹1');
   });
 
+  test('receiptsFromMaps sorts newest-first, corrupt dates last', () {
+    final out = PremiumService.receiptsFromMaps([
+      {'txId': 'old', 'used': true, 'createdAt': '2026-01-01T00:00:00.000'},
+      {'txId': 'new', 'used': false, 'createdAt': '2026-09-01T00:00:00.000'},
+      {'txId': 'broken', 'used': false, 'createdAt': 'not-a-date'},
+      {'txId': 'missing', 'used': false},
+    ]);
+
+    expect(out.map((r) => r.txId).toList(),
+        ['new', 'old', 'broken', 'missing']);
+    expect(out.first.used, isFalse);
+    expect(out[2].createdAt, isNull);
+  });
+
+  test('receiptsFromMaps coerces corrupt amounts to null', () {
+    final out = PremiumService.receiptsFromMaps([
+      {'txId': 'a', 'usdcMicro': 10000},
+      {'txId': 'b', 'usdcMicro': '10000'},
+      {'txId': 'c', 'usdcMicro': 'junk'},
+      {'txId': 'd'},
+    ]);
+
+    expect(out.map((r) => r.usdcMicro).toList(),
+        [10000, 10000, null, null]);
+  });
+
   test('empty data yields exactly the fallback suggestion', () {
     final report = ClinicalReportEngine.build(
         profile: {'name': 'Test'},

@@ -68,5 +68,14 @@
 		</array>
 		<key>UIStatusBarHidden</key>
 		<false/>
+		<!-- Demo stage only: allow plain-HTTP to the dev machine's LAN
+		     address for the premium x402 server (pay dialog). Scoped to
+		     local networking — internet ATS protection stays on. Remove
+		     when the server is hosted behind TLS. -->
+		<key>NSAppTransportSecurity</key>
+		<dict>
+			<key>NSAllowsLocalNetworking</key>
+			<true/>
+		</dict>
 	</dict>
 </plist>

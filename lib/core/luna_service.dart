@@ -151,6 +151,7 @@ class LunaService {
     required String serverUrl,
     required String message,
     required Map<String, dynamic> summary,
+    String? persona,
   }) async {
     if (message.trim().isEmpty) return null;
     try {
@@ -158,7 +159,12 @@ class LunaService {
           .post(
             Uri.parse('$serverUrl/api/luna/chat'),
             headers: {'content-type': 'application/json'},
-            body: jsonEncode({'message': message.trim(), 'summary': summary}),
+            body: jsonEncode({
+              'message': message.trim(),
+              'summary': summary,
+              if (persona != null && persona.isNotEmpty)
+                'persona': persona,
+            }),
           )
           .timeout(const Duration(seconds: 25));
       if (res.statusCode != 200 && res.statusCode != 429) return null;

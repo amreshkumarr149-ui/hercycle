@@ -2,10 +2,16 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- Demo stage: the premium x402 server runs on the dev machine's LAN
+         address over plain HTTP (see the pay dialog + server/README). Android
+         blocks non-loopback cleartext by default, so on-device 402/verify
+         calls would always fail without this. Production (hosted server +
+         TLS) should remove it again. -->
     <application
         android:label="hercycle"
         android:name="${applicationName}"
-        android:icon="@mipmap/launcher_icon">
+        android:icon="@mipmap/launcher_icon"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"

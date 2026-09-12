@@ -10,6 +10,9 @@ class UserProfile {
   final int typicalPeriodLength;
   final String? bloodGroup;
   final String? hadSexRecently;
+  /// Trying-to-conceive mode: reframes Home around fertility. Opt-in,
+  /// default off.
+  final bool ttcMode;
 
   UserProfile({
     required this.name,
@@ -21,6 +24,7 @@ class UserProfile {
     this.typicalPeriodLength = 5,
     this.bloodGroup,
     this.hadSexRecently,
+    this.ttcMode = false,
   });
 
   Map<String, dynamic> toFirestore() {
@@ -34,6 +38,7 @@ class UserProfile {
       'typicalPeriodLength': typicalPeriodLength,
       if (bloodGroup != null) 'bloodGroup': bloodGroup,
       if (hadSexRecently != null) 'hadSexRecently': hadSexRecently,
+      'ttcMode': ttcMode,
     };
   }
 
@@ -54,6 +59,7 @@ class UserProfile {
       typicalPeriodLength: data['typicalPeriodLength'] ?? 5,
       bloodGroup: data['bloodGroup'],
       hadSexRecently: data['hadSexRecently'],
+      ttcMode: data['ttcMode'] == true,
     );
   }
 }

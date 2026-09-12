@@ -24,6 +24,7 @@ cp .env.example .env
 ```
 
 ```env
+ALGORAND_NETWORK=testnet
 AVM_ADDRESS=<merchant address>
 FACILITATOR_URL=https://facilitator.goplausible.xyz
 AVM_MNEMONIC=<payer 25-word mnemonic, test client only>
@@ -31,6 +32,12 @@ PORT=4021
 ```
 
 Never commit `.env`.
+
+> **Networks:** `ALGORAND_NETWORK=testnet` (default, play money) or
+> `mainnet` (**real money** — the merchant address, USDC ASA
+> (`31566704`), ledger endpoint, receipt checks and the 402 terms all
+> switch together). Anything else fails fast at boot. `/health` reports
+> the active `networkName` plus an `explorerTxBase` for receipt links.
 
 ## 3. Run + prove the gate
 
@@ -81,6 +88,20 @@ report opens → export consumes exactly one receipt (one report per pay).
 - Bad body → `400`
 
 `GET /health` is free (liveness probe).
+
+`POST /api/luna/chat` — body `{ message: string (≤500 chars), summary: LunaSummary }`
+(log-grounded assistant; free route, throttled + 100/day/IP cap).
+
+- Factual intents (period dates, symptom history, moods, LH, notes) answered
+  deterministically from the posted 90-day summary — no LLM needed.
+- Interpretive questions use Gemini **only** when `GEMINI_API_KEY` is set
+  (Google AI Studio, free tier); every AI reply must cite dates/scores
+  present in the summary and contain zero diagnostic claims, or it is
+  replaced by the honest fallback. Without a key, all interpretive
+  questions get the fallback — the endpoint never errors for lack of AI.
+- Crisis and heavy-bleeding phrasing short-circuit to care redirects.
+- `400` bad body · `429` daily cap (with usable reply) · `500` safe fallback.
+- Regression suite: `npm run check:luna` (7 groups, no key/network needed).
 
 ## Privacy & security posture
 

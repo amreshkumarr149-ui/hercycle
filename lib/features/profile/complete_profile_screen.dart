@@ -1,8 +1,9 @@
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:hercycle/core/app_theme.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hercycle/models/user_profile.dart';
 import 'package:hercycle/services/user_service.dart';
+import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:intl/intl.dart';
 
 /// Repair path for accounts whose profile document is missing (e.g. signed
@@ -52,7 +53,7 @@ class _CompleteProfileScreenState
           content: Text('Period length must be between 1 and 15 days')));
       return;
     }
-    final user = FirebaseAuth.instance.currentUser;
+    final user = safeCurrentUser();
     if (user == null) {
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('You are not logged in')));
@@ -114,9 +115,9 @@ class _CompleteProfileScreenState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
+            Text(
               'Your profile is missing — add these details to unlock your dashboard and predictions.',
-              style: TextStyle(color: Colors.grey),
+              style: TextStyle(color: context.her.muted),
             ),
             const SizedBox(height: 24),
             TextField(

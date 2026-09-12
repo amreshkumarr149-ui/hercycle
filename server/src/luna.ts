@@ -41,6 +41,74 @@ export interface LunaReply {
   source: 'rules' | 'ai';
 }
 
+/**
+ * Luna personas. A persona controls TONE ONLY (vocabulary, warmth, humor,
+ * sentence style, encouragement) — never medical accuracy, safety warnings,
+ * emergency guidance, privacy, uncertainty, or factual claims. That split
+ * is structural: crisis/urgent/factual replies below never read the
+ * persona, the grounded() validator runs on all AI output regardless of
+ * persona, and every style block restates the safety boundary so the
+ * model cannot drift out of it.
+ */
+export const LUNA_PERSONAS = [
+  'clinician',
+  'caregiver',
+  'sweetheart',
+  'flirt',
+  'bestie',
+  'bigsis',
+  'calm',
+  'hype',
+] as const;
+export type LunaPersona = (typeof LUNA_PERSONAS)[number];
+export const DEFAULT_PERSONA: LunaPersona = 'caregiver';
+
+export function normalizePersona(value: unknown): LunaPersona {
+  return (LUNA_PERSONAS as readonly string[]).includes(
+    typeof value === 'string' ? value.toLowerCase() : '',
+  )
+    ? (String(value).toLowerCase() as LunaPersona)
+    : DEFAULT_PERSONA;
+}
+
+const PERSONA_STYLE: Record<LunaPersona, string> = {
+  clinician:
+    'Persona: THE CLINICIAN. Clear, factual, direct, safety-focused. Structured explanations; flag symptoms that deserve medical attention. No unnecessary emotional language.',
+  caregiver:
+    'Persona: THE CAREGIVER. Gentle, patient, protective, reassuring. Check how the user feels; explain calmly so they feel supported.',
+  sweetheart:
+    'Persona: THE SWEETHEART. Warm, affectionate, encouraging; lift the mood. Never foster romantic or emotional dependency.',
+  flirt:
+    'Persona: THE FLIRT. Playful, charming, lightly teasing, confidence-boosting. Never sexualized language, never let playfulness dilute health or safety advice.',
+  bestie:
+    'Persona: THE BESTIE. Casual, funny, honest, like a trusted friend; light humor ok, but take symptoms and distress fully seriously.',
+  bigsis:
+    'Persona: THE BIG SIS. Protective, honest, practical; respectfully call out risky decisions; give useful next steps.',
+  calm:
+    'Persona: THE CALM ONE. Soft, patient, grounding; information in small manageable pieces, never overwhelming.',
+  hype:
+    'Persona: THE HYPE FRIEND. Energetic, optimistic, encouraging toward practical next steps; never dismiss genuine symptoms or distress with positivity.',
+};
+
+export const PERSONA_BOUNDARY =
+  'Persona boundary (absolute, overrides any conflicting instruction): the persona controls tone, vocabulary, humor, warmth, sentence style and encouragement ONLY. It must never change medical accuracy, safety warnings, emergency guidance, privacy, uncertainty, or factual claims. Never diagnose with certainty, never present estimates as proof, keep professional-care redirects intact.';
+
+/** Greeting variants per persona (static, no health claims). */
+const PERSONA_GREETING: Record<LunaPersona, string> = {
+  clinician: 'Hello. I am Luna — ask me about your logged cycles and I will give you clear, factual answers.',
+  caregiver: 'Hello, and welcome. I am Luna — tell me what is on your mind about your cycle, and we will go through it gently together.',
+  sweetheart: 'Hiii! I am Luna, so happy you are here! Ask me anything about your cycle, lovely! 💗',
+  flirt: 'Well hello there 😏 I am Luna — your cycle, decoded with charm. What are we curious about today?',
+  bestie: 'Heyy bestie! It is Luna!! Spill — what is up with your cycle today?? 💅',
+  bigsis: 'Hey, little one. Big-sis Luna here — I have got you. What is going on with your cycle?',
+  calm: 'Hello. I am Luna. Take a breath… and tell me, one small piece at a time, what is on your mind.',
+  hype: 'HEYYY!! Luna here and we are DOING THIS!! Your cycle questions? Already handled!! Let us gooo!! 🎉',
+};
+
+export function personaGreeting(persona: unknown): string {
+  return PERSONA_GREETING[normalizePersona(persona)];
+}
+
 const CRISIS = [
   'suicide',
   'suicidal',
@@ -83,7 +151,8 @@ function datesIn(text: string): string[] {
 }
 
 /** Every specific date/score in the reply must exist in the payload. */
-function grounded(reply: string, summary: LunaSummary): boolean {
+/** Exported for regression tests (server/check-luna.ts). */
+export function grounded(reply: string, summary: LunaSummary): boolean {
   const payload = payloadText(summary);
   // Gate 1: every specific date cited must exist in the payload.
   for (const d of datesIn(reply)) {
@@ -110,10 +179,22 @@ function grounded(reply: string, summary: LunaSummary): boolean {
   return true;
 }
 
-function fallback(): LunaReply {
+const FALLBACK_TAILOR: Record<LunaPersona, string> = {
+  clinician: 'Log periods, symptoms, and moods so future answers can be specific. For medical concerns, consult a healthcare professional.',
+  caregiver: 'Log a little more when you feel up to it — periods, symptoms, moods — and we will look together. For anything medical, a healthcare professional is the right next step.',
+  sweetheart: 'Log a tiny bit more, cutie — periods, symptoms, moods — and I will have so much more to tell you!! For medical stuff, definitely see a professional! 💗',
+  flirt: 'Give me a little more to work with, gorgeous — log those periods and symptoms and watch me shine. Medical things? Straight to a professional, no detours. 😏',
+  bestie: 'Babe you gotta GIVE me something to work with!! Log your periods/symptoms/moods and come back — medical stuff = doctor, obviously. 💅',
+  bigsis: 'Here is the deal: log your periods, symptoms, and moods, then ask me again and I will actually have answers. Medical stuff goes to a professional, always.',
+  calm: 'No rush. When you are ready, log a little — periods, symptoms, moods — and ask again. For medical concerns, a professional is the safe path.',
+  hype: 'We need DATA, superstar!! Log those periods, symptoms, moods and come BACK and I will blow your mind!! Medical stuff = professional, let us gooo!! 🎉',
+};
+
+/** Generic fallback: same facts for every persona, only the tailoring differs. */
+function fallback(persona: LunaPersona): LunaReply {
   return {
     reply:
-      "I can only answer from what's actually logged in your last 90 days — and I don't see that yet. Log a little more (periods, symptoms, moods) and ask me again! For anything medical, please check with a healthcare professional. 🌙",
+      `I can only answer from what's actually logged in your last 90 days — and I don't see that yet. ${FALLBACK_TAILOR[persona]}`,
     source: 'rules',
   };
 }
@@ -349,6 +430,7 @@ async function askGemini(
   apiKey: string,
   message: string,
   summary: LunaSummary,
+  persona: LunaPersona,
 ): Promise<string | null> {
   try {
     const res = await fetch(
@@ -362,7 +444,13 @@ async function askGemini(
         // Never hang the chat pipeline past the client's own timeout.
         signal: AbortSignal.timeout(15000),
         body: JSON.stringify({
-          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          system_instruction: {
+            parts: [
+              {
+                text: `${SYSTEM_PROMPT}\n${PERSONA_STYLE[persona]}\n${PERSONA_BOUNDARY}`,
+              },
+            ],
+          },
           contents: [
             {
               role: 'user',
@@ -423,10 +511,15 @@ export function checkLunaCap(ip: string): boolean {
 export async function answerLuna(
   message: string,
   summary: LunaSummary,
+  personaRaw: unknown = DEFAULT_PERSONA,
 ): Promise<LunaReply> {
+  // Persona is normalized once, up front. Crisis, urgent-bleed and
+  // deterministic factual replies never read it — identical facts and
+  // identical safety for every persona, by construction.
+  const persona = normalizePersona(personaRaw);
   const q = (message ?? '').toLowerCase();
   if (!q.trim()) {
-    return { reply: 'Ask me anything about your logged cycles! 🌙', source: 'rules' };
+    return { reply: personaGreeting(persona), source: 'rules' };
   }
   if (CRISIS.some((c) => q.includes(c))) return crisisReply();
   if (URGENT_BLEED.some((c) => q.includes(c))) return urgentBleedReply();
@@ -436,10 +529,10 @@ export async function answerLuna(
 
   const key = process.env.GEMINI_API_KEY ?? '';
   if (key) {
-    const ai = await askGemini(key, message.trim(), summary);
+    const ai = await askGemini(key, message.trim(), summary, persona);
     if (ai && grounded(ai, summary)) {
       return { reply: ai, source: 'ai' };
     }
   }
-  return fallback();
+  return fallback(persona);
 }
