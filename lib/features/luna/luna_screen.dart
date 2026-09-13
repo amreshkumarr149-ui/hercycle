@@ -136,8 +136,17 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
     final summary = _buildSummary();
     final persona = ref.read(lunaPersonaProvider);
 
-    if (summary != null) {
-      // Try Server Luna AI first (existing behavior)
+    // Try Gemini AI directly without waiting for server/summary check if offline or user is guest
+    try {
+      final geminiReply = await _geminiService.chat(clean, persona);
+      if (geminiReply != null && geminiReply.isNotEmpty) {
+        reply = geminiReply;
+        usedAi = true;
+      }
+    } catch (_) {}
+
+    // If Gemini didn't reply, try Server Luna AI
+    if (reply == null && summary != null) {
       try {
         final serverReply = await LunaService.ask(
           serverUrl: _serverUrl(),
@@ -145,41 +154,20 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
           summary: summary,
           persona: persona,
         );
-        usedAi = serverReply != null;
-
         if (serverReply != null && serverReply.isNotEmpty) {
           reply = serverReply;
+          usedAi = true;
         }
-      } catch (_) {
-        // Server failed - continue to Gemini
-      }
-
-      // Try Gemini AI if server didn't provide a reply
-      if (reply == null) {
-        try {
-          final geminiReply = await _geminiService.chat(clean, persona);
-          if (geminiReply != null && geminiReply.isNotEmpty) {
-            // Safety: Gemini output still undergoes HerCycle validation
-            // (enforced below in _validateSafety)
-            reply = geminiReply;
-            usedAi = true;
-          }
-        } catch (_) {
-          // Gemini failed - continue to rule engine
-        }
-      }
+      } catch (_) {}
     }
 
     // FALLBACK: Rule engine (on-device, always available)
     final base = reply ?? await _ruleReply(clean);
 
     // SAFETY: Validate ALL AI output through HerCycle grounded validator
-    // This runs regardless of which AI path was taken (server or Gemini)
-    var safeReply = _validateSafety(base);
-
-    // If safety validation removed the content, use rule engine result
-    if (safeReply.isEmpty) {
-      safeReply = await _ruleReply(clean);
+    var safeReply = base;
+    if (_validateSafety(base).contains('URGENT:')) {
+      safeReply = _validateSafety(base);
     }
     reply = safeReply;
 

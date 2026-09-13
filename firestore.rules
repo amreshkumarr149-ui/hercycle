@@ -13,6 +13,10 @@ service cloud.firestore {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }
 
+      match /lhTests/{testId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
       match /premiumReports/{reportId} {
         allow read, write: if request.auth != null && request.auth.uid == userId;
       }

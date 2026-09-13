@@ -1,3 +1,4 @@
+import 'package:hercycle/core/lh_interpretation_model.dart';
 import 'package:hercycle/models/daily_log.dart';
 
 class CyclePredictionResult {
@@ -120,12 +121,17 @@ class CyclePredictorStateMachine {
     }).toList()
       ..sort((a, b) => a.date.compareTo(b.date));
 
-    // Check for LH High/Peak Lock-In (ratio >= 0.8, 'positive', 'high', or 'peak') in current cycle
+    // LH High/Peak lock-in. Threshold comes from the single-source LH
+    // interpretation model (PRD §17) — never a local duplicate constant.
     DailyLog? positiveLhLog;
     for (var log in currentCycleLogs) {
       final t = log.lhTest.toLowerCase();
       final ratio = log.lhRatio ?? 0.0;
-      if (t == 'positive' || t == 'high' || t == 'peak' || t == 'yes' || ratio >= 0.8) {
+      if (t == 'positive' ||
+          t == 'high' ||
+          t == 'peak' ||
+          t == 'yes' ||
+          ratio >= LhInterpretationModel.surgeThreshold) {
         positiveLhLog = log;
         break;
       }

@@ -128,6 +128,8 @@ class DatabaseRepository {
         lhStatusStr = 'Peak';
       } else if (entry.surgeStatus == LhSurgeStatus.high) {
         lhStatusStr = 'High';
+      } else if (entry.surgeStatus == LhSurgeStatus.rising) {
+        lhStatusStr = 'Rising';
       } else if (entry.entryType == LhEntryType.manual) {
         lhStatusStr = entry.manualResult == LhManualResult.positive ? 'Positive' : 'Negative';
       }
