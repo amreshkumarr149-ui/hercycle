@@ -22,6 +22,9 @@ class DailyLog {
   /// Omitted from Firestore when false.
   final bool intimacy;
 
+  /// Optional T/C ratio from AI scan.
+  final double? lhRatio;
+
   DailyLog({
     required this.date,
     required this.period,
@@ -29,6 +32,7 @@ class DailyLog {
     required this.mood,
     this.mucus = '',
     this.lhTest = '',
+    this.lhRatio,
     this.flowIntensity = 'None',
     this.painScore = 0,
     this.pelvicPressure = false,
@@ -79,6 +83,7 @@ class DailyLog {
       mood: data['mood'] ?? '',
       mucus: data['mucus'] ?? '',
       lhTest: data['lhTest'] ?? '',
+      lhRatio: data['lhRatio'] != null ? (data['lhRatio'] as num).toDouble() : null,
       flowIntensity: data['flowIntensity'] ?? 'None',
       painScore: (data['painScore'] is num) ? (data['painScore'] as num).toInt() : 0,
       pelvicPressure: data['pelvicPressure'] ?? false,
@@ -99,6 +104,7 @@ class DailyLog {
       'mood': mood,
       'mucus': mucus,
       'lhTest': lhTest,
+      if (lhRatio != null) 'lhRatio': lhRatio,
       'flowIntensity': flowIntensity,
       'painScore': painScore,
       'pelvicPressure': pelvicPressure,

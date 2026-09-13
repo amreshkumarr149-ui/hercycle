@@ -11,6 +11,203 @@ final _rose = PdfColor.fromHex('#C26D81');
 final _ink = PdfColor.fromHex('#4A4A4A');
 final _muted = PdfColor.fromHex('#8A8A8A');
 
+// Chart drawing helpers for PDF export
+/// Draws a pie chart showing distribution of values.
+/// [values] are the slice values (e.g., mood counts, symptom counts).
+/// [labels] are the slice labels (e.g., mood names, symptom names).
+/// Returns a [pw.Widget] containing the chart.
+pw.Widget _pieChartWidget(
+  List<double> values,
+  List<String> labels, {
+  double size = 180,
+}) {
+  final total = values.fold(0.0, (sum, v) => sum + v);
+  if (total == 0) {
+    return pw.Center(
+      child: pw.Text(
+        'No data',
+        style: pw.TextStyle(fontSize: 11, color: PdfColors.grey),
+      ),
+    );
+  }
+
+  // Create colored circles for each slice - simple representation
+  final cells = <pw.Widget>[];
+  final sliceColors = _pieMoodColors;
+  for (int i = 0; i < values.length; i++) {
+    final pct = values[i] / total;
+    final w = (pct * (size - 32)).ceil().toDouble();
+    final width = w >= 20.0 ? w : 20.0; // min 20px wide
+    cells.add(pw.Container(
+      width: width,
+      height: 20.0,
+      decoration: pw.BoxDecoration(
+        color: sliceColors[i % sliceColors.length],
+        borderRadius: pw.BorderRadius.circular(3),
+      ),
+    ));
+    // Add label below
+    cells.add(pw.SizedBox(width: w, child: pw.Text(
+      _pdf(labels[i].isNotEmpty ? labels[i] : '---'),
+      style: pw.TextStyle(fontSize: 8, color: PdfColors.grey),
+      textAlign: pw.TextAlign.center,
+    )));
+  }
+
+  return pw.Row(
+    mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+    children: cells.take(values.length).toList()..add(pw.SizedBox(width: 8)),
+  );
+}
+
+/// Draws a bar chart showing values as horizontal bars.
+/// [labels] are the bar labels (e.g., symptom names).
+/// [values] are the bar values (e.g., counts, severity scores).
+/// [maxValue] is the maximum value for scaling.
+/// Returns a [pw.Widget] containing the chart.
+pw.Widget _barChartWidget(
+  List<String> labels,
+  List<double> values, {
+  double maxValue = 10,
+  double barHeight = 16,
+  double size = 200,
+}) {
+  final maxV = maxValue >= 1.0 ? maxValue : 1.0;
+  return pw.Container(
+    width: size,
+    height: (barHeight + 8) * values.length + 24,
+    child: pw.Column(
+      crossAxisAlignment: pw.CrossAxisAlignment.start,
+      children: [
+        // Value axis label "maxValue" at top
+        pw.Padding(
+          padding: const pw.EdgeInsets.only(right: 8, bottom: 4),
+          child: pw.Text(
+            maxV.ceil().toString(),
+            style: pw.TextStyle(fontSize: 9, color: PdfColors.grey),
+          ),
+        ),
+        ...List.generate(values.length, (index) {
+          final pct = values[index] / maxV;
+          final barWidth = (pct * (size - 40)).ceil().toDouble();
+          return pw.Row(
+            children: [
+              // Label
+              pw.Expanded(
+                child: pw.Padding(
+                  padding: const pw.EdgeInsets.only(right: 4),
+                  child: pw.Text(
+                    _pdf(labels[index]),
+                    style: pw.TextStyle(fontSize: 9, color: PdfColors.grey),
+                  ),
+                ),
+              ),
+              // Bar
+              pw.Expanded(
+                flex: 1,
+                child: pw.Container(
+                  height: barHeight,
+                  width: barWidth >= 1 ? barWidth : 1,
+                  decoration: pw.BoxDecoration(
+                    color: _barGradientColors[index % _barGradientColors.length],
+                    borderRadius: pw.BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+            ],
+          );
+        }),
+        // Min value at bottom
+        pw.Padding(
+          padding: const pw.EdgeInsets.only(left: 8, top: 4),
+          child: pw.Text(
+            '0',
+            style: pw.TextStyle(fontSize: 9, color: PdfColors.grey),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Draws a simple line chart showing trends over time.
+/// [labels] are the x-axis labels (e.g., dates or cycle days).
+/// [values] are the y-axis values (e.g., mood scores, pain scores).
+/// Returns a [pw.Widget] containing the chart.
+pw.Widget _lineChartWidget(
+  List<String> labels,
+  List<double> values, {
+  double size = 200,
+}) {
+  if (values.length < 2) {
+    return pw.Center(
+      child: pw.Text(
+        'No trend data',
+        style: pw.TextStyle(fontSize: 11, color: PdfColors.grey),
+      ),
+    );
+  }
+
+  // Simple line chart using connected points
+  final steps = values.length - 1;
+  final points = <pw.Widget>[];
+  
+  // Plot each point as a small circle with labels
+  for (int i = 0; i < values.length; i++) {
+    final x = (i / steps.toDouble()) * (size - 40).toDouble() + 20.0;
+    final y = 30.0; // Fixed y-position for simple display
+    points.add(pw.Positioned(
+      left: x,
+      top: y,
+      child: pw.Container(
+        width: 6,
+        height: 6,
+        decoration: pw.BoxDecoration(
+          color: PdfColor.fromHex('#FF6B6B'),
+          borderRadius: pw.BorderRadius.circular(3),
+        ),
+      ),
+    ));
+    // Add label below
+    points.add(pw.Padding(
+      padding: const pw.EdgeInsets.only(top: 12),
+      child: pw.Text(
+        '${_pdf(labels[i])}: ${values[i].toInt()}',
+        style: pw.TextStyle(fontSize: 7, color: PdfColors.grey),
+      ),
+    ));
+  }
+
+  // Add simple visual separation between data points
+  return pw.Container(
+    width: size,
+    height: 50,
+    child: pw.Row(
+      crossAxisAlignment: pw.CrossAxisAlignment.end,
+      children: points.whereType<pw.Positioned>().toList(),
+    ),
+  );
+}
+
+// Color palette for charts (matching HerCycle semantic tokens)
+final _pieMoodColors = [
+  PdfColor.fromHex('#FF6B6B'),
+  PdfColor.fromHex('#4ECDC4'),
+  PdfColor.fromHex('#45B7D1'),
+  PdfColor.fromHex('#96CEB4'),
+  PdfColor.fromHex('#FFE65A'),
+  PdfColor.fromHex('#FF8C42'),
+];
+
+final _barGradientColors = [
+  PdfColor.fromHex('#FF6B6B'),
+  PdfColor.fromHex('#4ECDC4'),
+  PdfColor.fromHex('#45B7D1'),
+  PdfColor.fromHex('#96CEB4'),
+  PdfColor.fromHex('#FFE65A'),
+  PdfColor.fromHex('#FF8C42'),
+];
+
 /// The PDF uses standard Helvetica (WinAnsi). Emoji, arrows and dingbats
 /// outside that encoding would render blank or throw during layout, so every
 /// dynamic string passes through here. Accented Latin text is preserved.
@@ -221,6 +418,11 @@ Future<Uint8List> buildClinicalPdf({
                   [_pdf(b.name), _pdf(b.value), _pdf(b.reference), _pdf(b.tag)])
               .toList(),
         ),
+        pw.SizedBox(height: 8),
+        _pieChartWidget(
+          report.moods.entries.map((e) => e.value.toDouble()).toList(),
+          report.moods.entries.map((e) => e.key).toList(),
+        ),
         _sectionTitle(2, 'Automated Pattern Screening'),
         if (report.patterns.isEmpty && flaggedScreener.isEmpty)
           pw.Text('No tracked patterns crossed screening thresholds in this period.',
@@ -348,6 +550,12 @@ Future<Uint8List> buildClinicalPdf({
             ],
           );
         }),
+        // Cycle phase distribution pie chart
+        pw.SizedBox(height: 8),
+        _pieChartWidget(
+          _phaseCountsToValues(report.cycles),
+          _phaseCountsToLabels(report.cycles),
+        ),
         _sectionTitle(4, 'Trend Analysis'),
         if (report.trends.isEmpty)
           pw.Text('Not enough complete cycles to compare trends.',
@@ -366,6 +574,23 @@ Future<Uint8List> buildClinicalPdf({
                     [_pdf(t.name), _pdf(t.indicator), _pdf(t.detail)])
                 .toList(),
           ),
+        // Flow bar chart (bleeding days)
+        pw.SizedBox(height: 8),
+        _barChartWidget(
+          report.cycles.isNotEmpty
+              ? report.cycles.map((c) => '${c.length}d').toList()
+              : ['No cycles'],
+          report.cycles.isNotEmpty
+              ? report.cycles.map((c) => c.bleedingDays.toDouble()).toList()
+              : [0.0],
+          maxValue: (report.cycles.isNotEmpty ? report.cycles.map((c) => c.bleedingDays).reduce((a, b) => a > b ? a : b) : 10).toDouble(),
+        ),
+        // Mood trend line chart
+        pw.SizedBox(height: 8),
+        _lineChartWidget(
+          List.generate(report.trends.length, (i) => 'Day ${i + 1}'),
+          report.trends.map((t) => double.tryParse(t.indicator) ?? 0).toList(),
+        ),
         _sectionTitle(5, 'Symptom Summary'),
         if (report.symptoms.isEmpty)
           pw.Text('No symptoms logged in this period.',
@@ -392,6 +617,12 @@ Future<Uint8List> buildClinicalPdf({
                     ])
                 .toList(),
           ),
+        // Symptom distribution pie chart
+        pw.SizedBox(height: 8),
+        _pieChartWidget(
+          report.symptoms.map((s) => s.occurrences.toDouble()).toList(),
+          report.symptoms.map((s) => s.name).toList(),
+        ),
         _sectionTitle(6, 'Personalized Insights'),
         if (report.insights.isEmpty)
           pw.Text(
@@ -480,6 +711,28 @@ Future<Uint8List> buildClinicalPdf({
   );
 
   return pdf.save();
+}
+
+List<double> _phaseCountsToValues(List<dynamic> cycles) {
+  // Count phases across cycles for pie chart
+  final counts = <String, double>{};
+  for (final c in cycles) {
+    // Try to get phase data from cycle days
+    if (c != null && c.days != null) {
+      for (final day in c.days) {
+        final phase = day.phase ?? 'Menstrual';
+        counts[phase] = (counts[phase] ?? 0) + 1;
+      }
+    }
+  }
+  // Ensure all phases are represented
+  final allPhases = ['Menstrual', 'Follicular', 'Ovulation', 'Luteal'];
+  return allPhases.map((phase) => counts[phase] ?? 0.0).toList();
+}
+
+List<String> _phaseCountsToLabels(List<dynamic> cycles) {
+  final phases = ['Menstrual', 'Follicular', 'Ovulation', 'Luteal'];
+  return phases;
 }
 
 String _d(DateTime d) =>

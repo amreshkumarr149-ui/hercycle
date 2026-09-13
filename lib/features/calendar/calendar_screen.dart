@@ -6,6 +6,7 @@ import 'package:hercycle/providers/prediction_provider.dart';
 import 'package:hercycle/providers/auth_user_provider.dart';
 import 'package:table_calendar/table_calendar.dart';
 import 'package:hercycle/core/database_repository.dart';
+import 'package:hercycle/features/lh/lh_tracking_screen.dart';
 import 'package:hercycle/features/logging/daily_logging_screen.dart';
 import 'package:intl/intl.dart';
 
@@ -62,6 +63,19 @@ class _CalendarScreenState extends ConsumerState<CalendarScreen> {
   }
 
   Future<void> _openLog(String dateStr, [LogSection section = LogSection.all]) async {
+    if (section == LogSection.lh) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => LhTrackingScreen(initialDateStr: dateStr),
+        ),
+      );
+      await _loadMarkers();
+      if (!mounted) return;
+      setState(() {});
+      return;
+    }
+
     final saved = await Navigator.push(
       context,
       MaterialPageRoute(

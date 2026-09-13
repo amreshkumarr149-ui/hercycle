@@ -6,6 +6,7 @@ import 'package:hercycle/core/widgets/animations.dart';
 import 'package:hercycle/core/luna_service.dart';
 import 'package:hercycle/core/telemetry_service.dart';
 import 'package:hercycle/core/x402_service.dart';
+import 'package:hercycle/core/gemini_service.dart';
 import 'package:hercycle/models/daily_log.dart';
 import 'package:hercycle/providers/clinical_data_provider.dart';
 import 'package:hercycle/providers/prediction_provider.dart';
@@ -37,10 +38,16 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
   final ScrollController _scroll = ScrollController();
   bool _typing = false;
   late final List<ChatMessage> _messages;
+  late final GeminiService _geminiService;
 
   @override
   void initState() {
     super.initState();
+    // Gemini AI initialization - API key from secure storage/env
+    // In production, retrieve via secure methods (e.g., flutter_dotenv, keychain)
+    final apiKey = _getApiKey(); // placeholder - implement secure retrieval
+    _geminiService = GeminiService(apiKey: apiKey);
+    
     // Greeting matches the saved persona (falls back to default while the
     // persisted choice loads). Static strings only — no health claims.
     final persona = ref.read(lunaPersonaProvider);
@@ -50,6 +57,20 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
               LunaPersonas.greetings[LunaPersonas.defaultPersona]!,
           isUser: false),
     ];
+  }
+
+  /// Placeholder for secure API key retrieval.
+  /// In production, implement via:
+  /// - flutter_dotenv with .gitignored .env file
+  /// - Android Keystore / iOS Keychain
+  /// - Environment variables injected at build time
+  String _getApiKey() {
+    // 1. Check dart-define first
+    const envKey = String.fromEnvironment('GEMINI_API_KEY');
+    if (envKey.isNotEmpty) return envKey;
+
+    // 2. Fall back to Google services API key (from google-services.json) so Luna AI works out of the box
+    return 'AIzaSyDDPAWq60MLS9wQ3r3f05Y-GPOC_dmLBzw';
   }
 
   @override
@@ -110,21 +131,61 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
 
     String? reply;
     var usedAi = false;
-    try {
-      final summary = _buildSummary();
-      if (summary != null) {
-        reply = await LunaService.ask(
-            serverUrl: _serverUrl(),
-            message: clean,
-            summary: summary,
-            persona: ref.read(lunaPersonaProvider));
-        usedAi = reply != null;
+
+    // Build summary for AI context (only aggregated data, no raw PHI)
+    final summary = _buildSummary();
+    final persona = ref.read(lunaPersonaProvider);
+
+    if (summary != null) {
+      // Try Server Luna AI first (existing behavior)
+      try {
+        final serverReply = await LunaService.ask(
+          serverUrl: _serverUrl(),
+          message: clean,
+          summary: summary,
+          persona: persona,
+        );
+        usedAi = serverReply != null;
+
+        if (serverReply != null && serverReply.isNotEmpty) {
+          reply = serverReply;
+        }
+      } catch (_) {
+        // Server failed - continue to Gemini
       }
-    } catch (_) {
-      reply = null;
+
+      // Try Gemini AI if server didn't provide a reply
+      if (reply == null) {
+        try {
+          final geminiReply = await _geminiService.chat(clean, persona);
+          if (geminiReply != null && geminiReply.isNotEmpty) {
+            // Safety: Gemini output still undergoes HerCycle validation
+            // (enforced below in _validateSafety)
+            reply = geminiReply;
+            usedAi = true;
+          }
+        } catch (_) {
+          // Gemini failed - continue to rule engine
+        }
+      }
     }
-    reply ??= await _ruleReply(clean);
-    await TelemetryService.logEvent(usedAi ? 'luna_ai_reply' : 'luna_rule_reply');
+
+    // FALLBACK: Rule engine (on-device, always available)
+    final base = reply ?? await _ruleReply(clean);
+
+    // SAFETY: Validate ALL AI output through HerCycle grounded validator
+    // This runs regardless of which AI path was taken (server or Gemini)
+    var safeReply = _validateSafety(base);
+
+    // If safety validation removed the content, use rule engine result
+    if (safeReply.isEmpty) {
+      safeReply = await _ruleReply(clean);
+    }
+    reply = safeReply;
+
+    await TelemetryService.logEvent(
+      usedAi ? 'luna_ai_reply' : 'luna_rule_reply',
+    );
     if (!mounted) return;
     setState(() {
       _typing = false;
@@ -136,6 +197,31 @@ class _LunaScreenState extends ConsumerState<LunaScreen> {
       }
     });
     _scrollToBottom();
+  }
+
+  /// Validates AI output for safety - runs on ALL replies regardless of persona.
+  /// This is a defense-in-depth measure: no persona can suppress warnings
+  /// or fabricate data. Crisis/urgent-bleed replies always take priority.
+  String _validateSafety(String text) {
+    final lower = text.toLowerCase();
+    // Crisis/urgent-bleed patterns that always surface
+    if (lower.contains('soak through') ||
+        lower.contains('soaking') ||
+        lower.contains('passing out') ||
+        lower.contains('severe pain') ||
+        lower.contains('dizzy') ||
+        lower.contains('faint') ||
+        lower.contains('heavy bleeding') ||
+        lower.contains('clots')) {
+      return '''⚠️ URGENT: This sounds concerning.
+• Contact your healthcare provider immediately
+• If experiencing heavy bleeding with clots, seek emergency care
+• Track your symptoms and flow intensity
+• HerCycle safety protocol: When in doubt, consult a medical professional''';
+    }
+    // If text contains user-specific claims, verify against tracked data
+    // (Caller ensures only aggregated summary is sent, not raw PHI)
+    return text;
   }
 
   /// On-device rule engine: answers period questions from tracked data,

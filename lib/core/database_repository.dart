@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:hercycle/models/daily_log.dart';
+import 'package:hercycle/models/lh_test_entry.dart';
 
 class DatabaseRepository {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -106,5 +107,86 @@ class DatabaseRepository {
       return DailyLog.fromFirestore(doc.data()!);
     }
     return null;
+  }
+
+  // --- LH Test Entry persistence & DailyLog sync ---
+  Future<void> saveLhTest(String userId, LhTestEntry entry) async {
+    final docRef = _firestore
+        .collection('users')
+        .doc(userId)
+        .collection('lhTests')
+        .doc(entry.id);
+
+    await docRef.set(entry.toFirestore(), SetOptions(merge: true));
+
+    // Sync to DailyLog for the corresponding date so state machine & reports pick it up
+    try {
+      final dateStr = '${entry.timestamp.year.toString().padLeft(4, '0')}-${entry.timestamp.month.toString().padLeft(2, '0')}-${entry.timestamp.day.toString().padLeft(2, '0')}';
+      
+      String lhStatusStr = 'Low';
+      if (entry.surgeStatus == LhSurgeStatus.peak) {
+        lhStatusStr = 'Peak';
+      } else if (entry.surgeStatus == LhSurgeStatus.high) {
+        lhStatusStr = 'High';
+      } else if (entry.entryType == LhEntryType.manual) {
+        lhStatusStr = entry.manualResult == LhManualResult.positive ? 'Positive' : 'Negative';
+      }
+
+      final existingLog = await getLog(userId, dateStr);
+      final updatedLog = DailyLog(
+        date: dateStr,
+        period: existingLog?.period ?? false,
+        flowIntensity: existingLog?.flowIntensity ?? 'None',
+        symptoms: existingLog?.symptoms ?? [],
+        mood: existingLog?.mood ?? '',
+        painScore: existingLog?.painScore ?? 0,
+        notes: existingLog?.notes ?? entry.notes ?? '',
+        mucus: existingLog?.mucus ?? '',
+        lhTest: lhStatusStr,
+        symptomIntensity: existingLog?.symptomIntensity ?? {},
+        pelvicPressure: existingLog?.pelvicPressure ?? false,
+        backBowelPain: existingLog?.backBowelPain ?? false,
+        reliefTried: existingLog?.reliefTried ?? {},
+        reliefHelped: existingLog?.reliefHelped ?? {},
+        lhRatio: entry.tcRatio,
+      );
+      await saveLog(userId, updatedLog);
+    } catch (_) {
+      // Non-blocking sync catch
+    }
+  }
+
+  Future<List<LhTestEntry>> getLhTests(String userId, {int limit = 100}) async {
+    try {
+      final snapshot = await _firestore
+          .collection('users')
+          .doc(userId)
+          .collection('lhTests')
+          .orderBy('timestamp', descending: true)
+          .limit(limit)
+          .get();
+
+      return snapshot.docs
+          .map((doc) {
+            try {
+              return LhTestEntry.fromFirestore(doc.data());
+            } catch (_) {
+              return null;
+            }
+          })
+          .whereType<LhTestEntry>()
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> deleteLhTest(String userId, String testId) async {
+    await _firestore
+        .collection('users')
+        .doc(userId)
+        .collection('lhTests')
+        .doc(testId)
+        .delete();
   }
 }

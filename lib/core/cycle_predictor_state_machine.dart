@@ -40,8 +40,9 @@ class CyclePredictorStateMachine {
     required List<DailyLog> cycleLogs,
     required int lutealPhaseLength,
     DateTime? lastPeriodEndDate,
+    DateTime? nowOverride,
   }) {
-    final now = DateTime.now();
+    final now = nowOverride ?? DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
 
     // Clamp inputs to sane biological ranges so bad profile data can't
@@ -119,10 +120,12 @@ class CyclePredictorStateMachine {
     }).toList()
       ..sort((a, b) => a.date.compareTo(b.date));
 
-    // Check for LH Peak Lock-In (first Positive LH Test in current cycle)
+    // Check for LH High/Peak Lock-In (ratio >= 0.8, 'positive', 'high', or 'peak') in current cycle
     DailyLog? positiveLhLog;
     for (var log in currentCycleLogs) {
-      if (log.lhTest.toLowerCase() == 'positive') {
+      final t = log.lhTest.toLowerCase();
+      final ratio = log.lhRatio ?? 0.0;
+      if (t == 'positive' || t == 'high' || t == 'peak' || t == 'yes' || ratio >= 0.8) {
         positiveLhLog = log;
         break;
       }
@@ -134,13 +137,14 @@ class CyclePredictorStateMachine {
         final lhDay = DateTime(lhDate.year, lhDate.month, lhDate.day);
         isOvulationLocked = true;
         stateStatus = 'lhPeakLocked';
-        // Lock Ovulation Date = Positive LH Test Date + 1 Day
-        estimatedOvulationDate = lhDay.add(const Duration(days: 1));
+        // PRD Requirement: Ovulation shift updates predicted ovulation window to 24–36 hours post-detection.
+        // We set estimatedOvulationDate at +1 day (24 hours) with fertile window spanning surrounding detection.
+        estimatedOvulationDate = lhDay.add(const Duration(hours: 30)); // 30 hours post-detection (midway in 24-36h window)
         // Lock Next Period = Ovulation Date + Luteal Phase Length
         nextPeriodDate =
             estimatedOvulationDate.add(Duration(days: lutealLen));
         alertMessage =
-            "LH Peak detected! Ovulation and next period dates locked.";
+            "LH Surge detected (ratio >= 0.8)! Ovulation window updated to next 24–36 hours.";
       }
     }
 
